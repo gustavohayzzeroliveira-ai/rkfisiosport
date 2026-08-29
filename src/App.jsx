@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, Plus, Search, Calendar, Activity, AlertTriangle, ChevronLeft,
   X, Check, Clock, FileText, Phone, Trash2, CalendarPlus, Users,
-  Cake, Stethoscope, Save, Loader2, ClipboardList, Waves, Mic, Printer
+  Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -564,27 +564,26 @@ export default function ClinicaApp() {
         }}
       >
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div
               style={{
-                width: 38,
-                height: 38,
+                background: "#fff",
                 borderRadius: 10,
-                background: "rgba(255,255,255,0.18)",
+                padding: "6px 10px",
                 display: "flex",
                 alignItems: "center",
-                justifyContent: "center",
                 flexShrink: 0,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
               }}
             >
-              <Waves size={20} color="#fff" />
+              <img src="/logo.png" alt="RKFisioSport" style={{ height: 34, display: "block" }} />
             </div>
             <div>
-              <h1 style={{ fontFamily: FONT_DISPLAY, fontSize: 24, margin: 0, letterSpacing: 0.2, color: "#fff" }}>
-                RKFisioSport
-              </h1>
-              <p style={{ margin: "3px 0 0", fontSize: 13, color: "rgba(255,255,255,0.85)" }}>
-                Consultório Dr. Reinaldo · prontuários e controle de sessões
+              <p style={{ margin: 0, fontSize: 13, color: "rgba(255,255,255,0.9)", fontWeight: 600 }}>
+                Consultório Dr. Reinaldo
+              </p>
+              <p style={{ margin: "1px 0 0", fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
+                Prontuários e controle de sessões
               </p>
             </div>
           </div>
@@ -892,9 +891,9 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
         <ChevronLeft size={16} /> Todos os pacientes
       </button>
 
-      <h1 className="print-only" style={{ fontFamily: FONT_DISPLAY, fontSize: 20, margin: "0 0 14px" }}>
-        RKFisioSport — Prontuário
-      </h1>
+      <div className="print-only" style={{ marginBottom: 14 }}>
+        <img src="/logo.png" alt="RKFisioSport" style={{ height: 54, display: "block" }} />
+      </div>
 
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 24 }}>
         <div
