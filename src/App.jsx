@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, Plus, Search, Calendar, Activity, AlertTriangle, ChevronLeft,
   X, Check, Clock, FileText, Phone, Trash2, CalendarPlus, Users,
-  Cake, Stethoscope, Save, Loader2, ClipboardList, Waves
+  Cake, Stethoscope, Save, Loader2, ClipboardList, Waves, Mic, Printer
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -227,6 +227,105 @@ const inputStyle = {
   outline: "none",
 };
 
+// Campo de texto com botão de ditado por voz (Web Speech API).
+// Funciona bem no Chrome e Edge; em navegadores sem suporte, o botão
+// de microfone simplesmente não aparece e o campo funciona normalmente.
+function VoiceTextarea({ value, onChange, onBlur, placeholder, minHeight = 80 }) {
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  const supported =
+    typeof window !== "undefined" &&
+    !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  useEffect(() => {
+    if (!supported) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = new SR();
+    recognition.lang = "pt-BR";
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      const current = valueRef.current || "";
+      const next =
+        current && !current.endsWith(" ") ? current + " " + transcript : current + transcript;
+      onChange(next);
+    };
+    recognition.onerror = () => setListening(false);
+    recognition.onend = () => setListening(false);
+    recognitionRef.current = recognition;
+    return () => {
+      try {
+        recognition.stop();
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supported]);
+
+  function toggle() {
+    if (!recognitionRef.current) return;
+    if (listening) {
+      recognitionRef.current.stop();
+      setListening(false);
+    } else {
+      try {
+        recognitionRef.current.start();
+        setListening(true);
+      } catch (e) {}
+    }
+  }
+
+  return (
+    <div style={{ position: "relative" }}>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
+        placeholder={placeholder}
+        style={{
+          ...inputStyle,
+          minHeight,
+          fontFamily: FONT_BODY,
+          resize: "vertical",
+          paddingRight: supported ? 38 : 11,
+        }}
+      />
+      {supported && (
+        <button
+          type="button"
+          onClick={toggle}
+          title={listening ? "Parar ditado" : "Ditar por voz"}
+          className="no-print"
+          style={{
+            position: "absolute",
+            top: 8,
+            right: 8,
+            width: 26,
+            height: 26,
+            borderRadius: "50%",
+            border: "none",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: listening ? COLOR.clay : COLOR.cyanBg,
+            color: listening ? "#fff" : COLOR.cyanDark,
+            animation: listening ? "rkPulse 1.1s ease-in-out infinite" : "none",
+          }}
+        >
+          <Mic size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Modal({ title, onClose, children, width = 440 }) {
   return (
     <div
@@ -439,6 +538,23 @@ export default function ClinicaApp() {
         overflow: "hidden",
       }}
     >
+      <style>{`
+        @keyframes rkPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        @media print {
+          body * { visibility: hidden; }
+          #printable-patient, #printable-patient * { visibility: visible; }
+          #printable-patient {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            padding: 16px;
+          }
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+        }
+        .print-only { display: none; }
+      `}</style>
       {/* header */}
       <div
         style={{
@@ -767,13 +883,18 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
   }
 
   return (
-    <div>
+    <div id="printable-patient">
       <button
         onClick={onBack}
+        className="no-print"
         style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, color: COLOR.inkLight, fontSize: 13, marginBottom: 16, padding: 0 }}
       >
         <ChevronLeft size={16} /> Todos os pacientes
       </button>
+
+      <h1 className="print-only" style={{ fontFamily: FONT_DISPLAY, fontSize: 20, margin: "0 0 14px" }}>
+        RKFisioSport — Prontuário
+      </h1>
 
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 24 }}>
         <div
@@ -809,7 +930,8 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
                 </div>
               </div>
             )}
-            <div style={{ display: "flex", gap: 6 }}>
+            <div className="no-print" style={{ display: "flex", gap: 6 }}>
+              <Btn variant="outline" onClick={() => window.print()}><Printer size={14} /> Imprimir</Btn>
               {!editing ? (
                 <Btn variant="outline" onClick={() => setEditing(true)}>Editar</Btn>
               ) : (
@@ -828,11 +950,11 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
                 {patient.diagnosis || "Nenhuma anotação ainda."}
               </p>
             ) : (
-              <textarea
-                style={{ ...inputStyle, minHeight: 90, fontFamily: FONT_BODY, resize: "vertical" }}
+              <VoiceTextarea
                 value={draft.diagnosis || ""}
-                onChange={(e) => setDraft({ ...draft, diagnosis: e.target.value })}
+                onChange={(v) => setDraft({ ...draft, diagnosis: v })}
                 placeholder="Diagnóstico, histórico, observações clínicas gerais…"
+                minHeight={90}
               />
             )}
           </div>
@@ -882,7 +1004,7 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
         <h3 style={{ fontFamily: FONT_DISPLAY, fontSize: 17, margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
           <ClipboardList size={16} /> Sessões
         </h3>
-        <Btn onClick={onAddSession}><Plus size={14} /> Registrar sessão</Btn>
+        <span className="no-print"><Btn onClick={onAddSession}><Plus size={14} /> Registrar sessão</Btn></span>
       </div>
 
       {sortedSessions.length === 0 ? (
@@ -952,7 +1074,7 @@ function SessionRow({ session, patient, onToggleStatus, onNotesChange, onDelete 
             <Badge tone={done ? "default" : "neutral"}>{done ? "realizada" : "agendada"}</Badge>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div className="no-print" style={{ display: "flex", gap: 6 }}>
           {!done && (
             <a href={googleCalendarLink(session, patient)} target="_blank" rel="noopener noreferrer">
               <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
@@ -965,13 +1087,15 @@ function SessionRow({ session, patient, onToggleStatus, onNotesChange, onDelete 
           </Btn>
         </div>
       </div>
-      <textarea
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-        onBlur={() => onNotesChange(notes)}
-        placeholder="Evolução clínica desta sessão…"
-        style={{ ...inputStyle, marginTop: 10, minHeight: 50, fontFamily: FONT_BODY, resize: "vertical" }}
-      />
+      <div style={{ marginTop: 10 }}>
+        <VoiceTextarea
+          value={notes}
+          onChange={setNotes}
+          onBlur={() => onNotesChange(notes)}
+          placeholder="Evolução clínica desta sessão…"
+          minHeight={50}
+        />
+      </div>
     </div>
   );
 }
@@ -1072,11 +1196,11 @@ function AddPatientModal({ onClose, onSave }) {
         </Field>
       </div>
       <Field label="Diagnóstico / observações">
-        <textarea
-          style={{ ...inputStyle, minHeight: 80, fontFamily: FONT_BODY, resize: "vertical" }}
+        <VoiceTextarea
           value={form.diagnosis}
-          onChange={(e) => setForm({ ...form, diagnosis: e.target.value })}
+          onChange={(v) => setForm({ ...form, diagnosis: v })}
           placeholder="Lombalgia crônica, pós-operatório de joelho…"
+          minHeight={80}
         />
       </Field>
       <Field label="Total de sessões do plano (0 a 20)">
@@ -1127,11 +1251,11 @@ function AddSessionModal({ onClose, onSave }) {
         </select>
       </Field>
       <Field label="Evolução clínica (opcional)">
-        <textarea
-          style={{ ...inputStyle, minHeight: 80, fontFamily: FONT_BODY, resize: "vertical" }}
+        <VoiceTextarea
           value={form.notes}
-          onChange={(e) => setForm({ ...form, notes: e.target.value })}
+          onChange={(v) => setForm({ ...form, notes: v })}
           placeholder="Como o paciente respondeu, exercícios feitos, dor referida…"
+          minHeight={80}
         />
       </Field>
       {error && <p style={{ color: COLOR.clayDark, fontSize: 13, marginTop: -6 }}>{error}</p>}
