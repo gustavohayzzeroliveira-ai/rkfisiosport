@@ -178,7 +178,10 @@ function eventPayload(session, patient) {
 export async function createGoogleEvent(session, patient) {
   try {
     const token = await ensureAccessToken();
-    if (!token) return null;
+    if (!token) {
+      console.warn("[RKFisioSport/Google] Sem token de acesso válido ao tentar criar evento.");
+      return null;
+    }
     const res = await fetch(
       "https://www.googleapis.com/calendar/v3/calendars/primary/events",
       {
@@ -187,10 +190,15 @@ export async function createGoogleEvent(session, patient) {
         body: JSON.stringify(eventPayload(session, patient)),
       }
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[RKFisioSport/Google] Falha ao criar evento (HTTP ${res.status}):`, body);
+      return null;
+    }
     const data = await res.json();
     return data.id || null;
   } catch (e) {
+    console.error("[RKFisioSport/Google] Erro de rede ao criar evento:", e);
     return null;
   }
 }
@@ -207,8 +215,13 @@ export async function updateGoogleEvent(eventId, session, patient) {
         body: JSON.stringify(eventPayload(session, patient)),
       }
     );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[RKFisioSport/Google] Falha ao atualizar evento (HTTP ${res.status}):`, body);
+    }
     return res.ok;
   } catch (e) {
+    console.error("[RKFisioSport/Google] Erro de rede ao atualizar evento:", e);
     return false;
   }
 }
@@ -221,8 +234,13 @@ export async function deleteGoogleEvent(eventId) {
       `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
       { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }
     );
+    if (!res.ok && res.status !== 410 && res.status !== 404) {
+      const body = await res.text().catch(() => "");
+      console.error(`[RKFisioSport/Google] Falha ao apagar evento (HTTP ${res.status}):`, body);
+    }
     return res.ok || res.status === 410 || res.status === 404;
   } catch (e) {
+    console.error("[RKFisioSport/Google] Erro de rede ao apagar evento:", e);
     return false;
   }
 }

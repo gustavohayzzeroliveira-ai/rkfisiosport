@@ -506,13 +506,22 @@ export default function ClinicaApp() {
   async function addSessions(patientId, sessionsList) {
     const patient = patients.find((p) => p.id === patientId);
     const newSessions = [];
+    let syncFailed = false;
     for (const session of sessionsList) {
       let googleEventId = null;
       if (googleConnected && session.status === "agendada" && patient) {
         googleEventId = await createGoogleEvent(session, patient);
-        if (!googleEventId) setGoogleConnected(isGoogleConnected());
+        if (!googleEventId) {
+          syncFailed = true;
+          setGoogleConnected(isGoogleConnected());
+        }
       }
       newSessions.push({ id: uid(), ...session, googleEventId });
+    }
+    if (syncFailed) {
+      setGoogleError(
+        "A sessão foi salva, mas não sincronizou com o Google Agenda. Abra o Console do navegador (F12) para ver o motivo, ou tente reconectar."
+      );
     }
     persist(
       patients.map((p) =>
