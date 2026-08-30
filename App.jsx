@@ -2,9 +2,17 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, Plus, Search, Calendar, Activity, AlertTriangle, ChevronLeft,
   X, Check, Clock, FileText, Phone, Trash2, CalendarPlus, Users,
-  Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer
+  Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer, CalendarCheck
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
+import {
+  connectGoogleCalendar,
+  isGoogleConnected,
+  getConnectedEmail,
+  createGoogleEvent,
+  updateGoogleEvent,
+  deleteGoogleEvent,
+} from "./googleCalendar";
 
 // ---------- design tokens: RKFisioSport (azul ciano + verde) ----------
 const COLOR = {
@@ -401,6 +409,10 @@ function Badge({ children, tone = "default" }) {
 export default function ClinicaApp() {
   const [patients, setPatients] = useState(null); // null = loading
   const [saveError, setSaveError] = useState(false);
+  const [googleConnected, setGoogleConnected] = useState(false);
+  const [googleEmail, setGoogleEmail] = useState("");
+  const [googleConnecting, setGoogleConnecting] = useState(false);
+  const [googleError, setGoogleError] = useState("");
   const [tab, setTab] = useState("pacientes");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState(null);
@@ -440,6 +452,10 @@ export default function ClinicaApp() {
       birthdate: data.birthdate,
       diagnosis: data.diagnosis,
       planTotal: Number(data.planTotal) || 0,
+      height: data.height || "",
+      weight: data.weight || "",
+      bodyFat: data.bodyFat || "",
+      muscleMass: data.muscleMass || "",
       createdAt: todayISO(),
       sessions: [], // histórico de sessões exclusivo deste paciente
     };
@@ -458,33 +474,97 @@ export default function ClinicaApp() {
     setConfirmDelete(null);
   }
 
+  async function handleConnectGoogle() {
+    setGoogleError("");
+    setGoogleConnecting(true);
+    try {
+      await connectGoogleCalendar();
+      setGoogleConnected(true);
+      setGoogleEmail(getConnectedEmail() || "");
+    } catch (e) {
+      if (e?.wrongAccount) {
+        setGoogleError(
+          `Essa conta (${e.email || "desconhecida"}) não é a autorizada. Conecte com ${e.required}.`
+        );
+      } else if (e?.message?.includes("VITE_GOOGLE_CLIENT_ID")) {
+        setGoogleError("O app ainda não tem a chave do Google configurada (VITE_GOOGLE_CLIENT_ID).");
+      } else {
+        setGoogleError("Não foi possível conectar ao Google Agenda. Tente de novo.");
+      }
+      setGoogleConnected(false);
+    } finally {
+      setGoogleConnecting(false);
+    }
+  }
+
   // Sessões são sempre adicionadas dentro do array do paciente cujo id foi passado,
   // garantindo que o contador de cada paciente nunca se mistura com o de outro.
-  function addSession(patientId, session) {
+  // Quando o Google Agenda está conectado, cada sessão "agendada" também vira um
+  // evento automático no Google Calendar — sem precisar clicar em nada.
+  // Aceita uma lista de sessões de uma vez, o que permite criar agendamentos
+  // periódicos (semanal, quinzenal etc.) em uma única chamada.
+  async function addSessions(patientId, sessionsList) {
+    const patient = patients.find((p) => p.id === patientId);
+    const newSessions = [];
+    for (const session of sessionsList) {
+      let googleEventId = null;
+      if (googleConnected && session.status === "agendada" && patient) {
+        googleEventId = await createGoogleEvent(session, patient);
+        if (!googleEventId) setGoogleConnected(isGoogleConnected());
+      }
+      newSessions.push({ id: uid(), ...session, googleEventId });
+    }
     persist(
       patients.map((p) =>
-        p.id === patientId
-          ? { ...p, sessions: [...(p.sessions || []), { id: uid(), ...session }] }
-          : p
+        p.id === patientId ? { ...p, sessions: [...(p.sessions || []), ...newSessions] } : p
       )
     );
     setSessionModalFor(null);
   }
 
-  function updateSession(patientId, sessionId, patch) {
+  async function updateSession(patientId, sessionId, patch) {
+    const patient = patients.find((p) => p.id === patientId);
+    const session = patient?.sessions.find((s) => s.id === sessionId);
+    let googleEventId = session?.googleEventId || null;
+
+    if (patient && session) {
+      const updated = { ...session, ...patch };
+      if (googleConnected) {
+        if (updated.status === "realizada" && googleEventId) {
+          // sessão concluída: some do calendário, já que não é mais um compromisso futuro
+          await deleteGoogleEvent(googleEventId);
+          googleEventId = null;
+        } else if (updated.status === "agendada") {
+          if (googleEventId) {
+            const ok = await updateGoogleEvent(googleEventId, updated, patient);
+            if (!ok) setGoogleConnected(isGoogleConnected());
+          } else {
+            googleEventId = await createGoogleEvent(updated, patient);
+          }
+        }
+      }
+    }
+
     persist(
       patients.map((p) =>
         p.id === patientId
           ? {
               ...p,
-              sessions: p.sessions.map((s) => (s.id === sessionId ? { ...s, ...patch } : s)),
+              sessions: p.sessions.map((s) =>
+                s.id === sessionId ? { ...s, ...patch, googleEventId } : s
+              ),
             }
           : p
       )
     );
   }
 
-  function deleteSession(patientId, sessionId) {
+  async function deleteSession(patientId, sessionId) {
+    const patient = patients.find((p) => p.id === patientId);
+    const session = patient?.sessions.find((s) => s.id === sessionId);
+    if (googleConnected && session?.googleEventId) {
+      await deleteGoogleEvent(session.googleEventId);
+    }
     persist(
       patients.map((p) =>
         p.id === patientId
@@ -587,11 +667,57 @@ export default function ClinicaApp() {
               </p>
             </div>
           </div>
-          {saveError && (
-            <span style={{ fontSize: 12, color: "#fff", background: "rgba(0,0,0,0.2)", padding: "4px 8px", borderRadius: 6 }}>
-              Não foi possível salvar agora. Tentando novamente…
-            </span>
-          )}
+          <div className="no-print" style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            {googleConnected ? (
+              <span
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: "#fff",
+                  background: "rgba(255,255,255,0.18)",
+                  padding: "5px 10px",
+                  borderRadius: 999,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                }}
+              >
+                <CalendarCheck size={13} /> Google Agenda{googleEmail ? ` · ${googleEmail}` : " conectada"}
+              </span>
+            ) : (
+              <button
+                onClick={handleConnectGoogle}
+                disabled={googleConnecting}
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: COLOR.cyanDark,
+                  background: "#fff",
+                  border: "none",
+                  padding: "6px 12px",
+                  borderRadius: 999,
+                  cursor: googleConnecting ? "default" : "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  opacity: googleConnecting ? 0.7 : 1,
+                }}
+              >
+                <CalendarCheck size={13} />
+                {googleConnecting ? "Conectando…" : "Conectar Google Agenda"}
+              </button>
+            )}
+            {saveError && (
+              <span style={{ fontSize: 12, color: "#fff", background: "rgba(0,0,0,0.2)", padding: "4px 8px", borderRadius: 6 }}>
+                Não foi possível salvar agora. Tentando novamente…
+              </span>
+            )}
+            {googleError && (
+              <span style={{ fontSize: 12, color: "#fff", background: "rgba(0,0,0,0.25)", padding: "4px 8px", borderRadius: 6, maxWidth: 220, textAlign: "right" }}>
+                {googleError}
+              </span>
+            )}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 4, marginTop: 18 }}>
           {[
@@ -665,6 +791,7 @@ export default function ClinicaApp() {
             onUpdateSession={(sid, patch) => updateSession(selected.id, sid, patch)}
             onDeleteSession={(sid) => deleteSession(selected.id, sid)}
             onDelete={() => setConfirmDelete(selected.id)}
+            googleConnected={googleConnected}
           />
         )}
 
@@ -683,7 +810,7 @@ export default function ClinicaApp() {
       {sessionModalFor && (
         <AddSessionModal
           onClose={() => setSessionModalFor(null)}
-          onSave={(session) => addSession(sessionModalFor, session)}
+          onSave={(sessionsList) => addSessions(sessionModalFor, sessionsList)}
         />
       )}
 
@@ -854,13 +981,15 @@ function EmptyState({ icon: Icon, title, body, action }) {
 }
 
 // ---------- patient detail ----------
-function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSession, onDeleteSession, onDelete }) {
+function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSession, onDeleteSession, onDelete, googleConnected }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(patient);
+  const [showAtestado, setShowAtestado] = useState(false);
 
   useEffect(() => {
     setDraft(patient);
     setEditing(false);
+    setShowAtestado(false);
   }, [patient.id]);
 
   const used = sessionsRealizadas(patient);
@@ -870,6 +999,10 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
     (b.date + (b.time || "")).localeCompare(a.date + (a.time || ""))
   );
 
+  if (showAtestado) {
+    return <AtestadoView patient={patient} onBack={() => setShowAtestado(false)} />;
+  }
+
   function save() {
     onUpdate({
       name: draft.name,
@@ -877,9 +1010,15 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
       birthdate: draft.birthdate,
       diagnosis: draft.diagnosis,
       planTotal: Number(draft.planTotal) || 0,
+      height: draft.height || "",
+      weight: draft.weight || "",
+      bodyFat: draft.bodyFat || "",
+      muscleMass: draft.muscleMass || "",
     });
     setEditing(false);
   }
+
+  const hasBodyData = patient.height || patient.weight || patient.bodyFat || patient.muscleMass;
 
   return (
     <div id="printable-patient">
@@ -913,6 +1052,14 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
                   {patient.phone && <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Phone size={13} /> {patient.phone}</span>}
                   {patient.birthdate && <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Cake size={13} /> {fmtDate(patient.birthdate)}</span>}
                 </div>
+                {hasBodyData && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                    {patient.height && <Badge tone="neutral">Altura {patient.height} cm</Badge>}
+                    {patient.weight && <Badge tone="neutral">Peso {patient.weight} kg</Badge>}
+                    {patient.bodyFat && <Badge tone="neutral">Gordura {patient.bodyFat}%</Badge>}
+                    {patient.muscleMass && <Badge tone="neutral">Músculo {patient.muscleMass}%</Badge>}
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ flex: 1, marginRight: 12 }}>
@@ -927,10 +1074,59 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
                     <input type="date" style={inputStyle} value={draft.birthdate || ""} onChange={(e) => setDraft({ ...draft, birthdate: e.target.value })} />
                   </Field>
                 </div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: COLOR.inkLight, textTransform: "uppercase", letterSpacing: 0.4, margin: "10px 0 6px" }}>
+                  Composição corporal
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Field label="Altura (cm)">
+                    <input
+                      type="number"
+                      min={0}
+                      max={250}
+                      style={{ ...inputStyle, width: 84 }}
+                      value={draft.height || ""}
+                      onChange={(e) => setDraft({ ...draft, height: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Peso (kg)">
+                    <input
+                      type="number"
+                      min={0}
+                      max={400}
+                      step="0.1"
+                      style={{ ...inputStyle, width: 84 }}
+                      value={draft.weight || ""}
+                      onChange={(e) => setDraft({ ...draft, weight: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="% gordura">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step="0.1"
+                      style={{ ...inputStyle, width: 84 }}
+                      value={draft.bodyFat || ""}
+                      onChange={(e) => setDraft({ ...draft, bodyFat: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="% músculo">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step="0.1"
+                      style={{ ...inputStyle, width: 84 }}
+                      value={draft.muscleMass || ""}
+                      onChange={(e) => setDraft({ ...draft, muscleMass: e.target.value })}
+                    />
+                  </Field>
+                </div>
               </div>
             )}
             <div className="no-print" style={{ display: "flex", gap: 6 }}>
               <Btn variant="outline" onClick={() => window.print()}><Printer size={14} /> Imprimir</Btn>
+              <Btn variant="outline" onClick={() => setShowAtestado(true)}><FileText size={14} /> Atestado</Btn>
               {!editing ? (
                 <Btn variant="outline" onClick={() => setEditing(true)}>Editar</Btn>
               ) : (
@@ -1020,6 +1216,7 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
               key={s.id}
               session={s}
               patient={patient}
+              googleConnected={googleConnected}
               onToggleStatus={() =>
                 onUpdateSession(s.id, { status: s.status === "realizada" ? "agendada" : "realizada" })
               }
@@ -1033,9 +1230,125 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
   );
 }
 
-function SessionRow({ session, patient, onToggleStatus, onNotesChange, onDelete }) {
+function defaultAtestadoText(patient, dias, dataISO) {
+  const diasTexto = Number(dias) === 1 ? "1 (um) dia" : `${dias} (${dias}) dias`;
+  return `Atesto, para os devidos fins, que o(a) paciente ${patient.name} esteve sob acompanhamento fisioterapêutico nesta clínica, necessitando de afastamento de suas atividades habituais pelo período de ${diasTexto}, a contar de ${fmtDate(
+    dataISO
+  )}.`;
+}
+
+// Tela de emissão de atestado: painel de edição (não imprime) + prévia em
+// formato de papel timbrado (é essa parte que vai para o papel). Reaproveita
+// o mesmo id="printable-patient" da ficha do paciente, já que só uma das
+// duas telas fica montada por vez.
+function AtestadoView({ patient, onBack }) {
+  const [data, setData] = useState(todayISO());
+  const [dias, setDias] = useState(3);
+  const [cid, setCid] = useState("");
+  const [texto, setTexto] = useState(() => defaultAtestadoText(patient, 3, todayISO()));
+
+  function regenerarTexto() {
+    setTexto(defaultAtestadoText(patient, dias, data));
+  }
+
+  return (
+    <div id="printable-patient">
+      <button
+        onClick={onBack}
+        className="no-print"
+        style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, color: COLOR.inkLight, fontSize: 13, marginBottom: 16, padding: 0 }}
+      >
+        <ChevronLeft size={16} /> Voltar ao prontuário
+      </button>
+
+      <div
+        className="no-print"
+        style={{
+          background: COLOR.paperRaised,
+          border: `1px solid ${COLOR.border}`,
+          borderRadius: 12,
+          padding: 20,
+          marginBottom: 20,
+        }}
+      >
+        <h3 style={{ fontFamily: FONT_DISPLAY, fontSize: 17, margin: "0 0 14px" }}>
+          Emitir atestado — {patient.name}
+        </h3>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Field label="Data do atestado">
+            <input type="date" style={inputStyle} value={data} onChange={(e) => setData(e.target.value)} />
+          </Field>
+          <Field label="Dias de afastamento">
+            <input
+              type="number"
+              min={0}
+              max={365}
+              style={{ ...inputStyle, width: 90 }}
+              value={dias}
+              onChange={(e) => setDias(Math.max(0, Number(e.target.value) || 0))}
+            />
+          </Field>
+          <Field label="CID (opcional)">
+            <input style={inputStyle} value={cid} onChange={(e) => setCid(e.target.value)} placeholder="Ex: M54.5" />
+          </Field>
+        </div>
+        <Btn variant="outline" onClick={regenerarTexto} style={{ marginBottom: 14 }}>
+          Gerar texto padrão com esses dados
+        </Btn>
+        <Field label="Texto do atestado">
+          <VoiceTextarea value={texto} onChange={setTexto} minHeight={130} placeholder="Texto do atestado…" />
+        </Field>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <Btn onClick={() => window.print()}>
+            <Printer size={14} /> Imprimir atestado
+          </Btn>
+        </div>
+      </div>
+
+      {/* Prévia — é exatamente isto que sai impresso, em papel timbrado */}
+      <div
+        style={{
+          background: "#fff",
+          border: `1px solid ${COLOR.border}`,
+          borderRadius: 12,
+          padding: "40px 44px",
+          minHeight: 480,
+        }}
+      >
+        <img src="/logo.png" alt="RKFisioSport" style={{ height: 60, display: "block", marginBottom: 26 }} />
+        <div style={{ textAlign: "right", fontSize: 13, color: COLOR.inkLight, marginBottom: 30 }}>
+          {fmtDateLong(data)}
+        </div>
+        <h2
+          style={{
+            fontFamily: FONT_DISPLAY,
+            fontSize: 20,
+            textAlign: "center",
+            margin: "0 0 30px",
+            letterSpacing: 1.5,
+            textTransform: "uppercase",
+          }}
+        >
+          Atestado
+        </h2>
+        <p style={{ fontSize: 15, lineHeight: 1.9, whiteSpace: "pre-wrap", textAlign: "justify", margin: 0 }}>
+          {texto}
+        </p>
+        {cid && <p style={{ fontSize: 13, color: COLOR.inkLight, marginTop: 14 }}>CID: {cid}</p>}
+        <div style={{ marginTop: 90, textAlign: "center" }}>
+          <div style={{ borderTop: `1px solid ${COLOR.ink}`, width: 260, margin: "0 auto 6px" }} />
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Dr. Reinaldo</div>
+          <div style={{ fontSize: 12, color: COLOR.inkLight }}>Fisioterapeuta — RKFisioSport</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SessionRow({ session, patient, googleConnected, onToggleStatus, onNotesChange, onDelete }) {
   const [notes, setNotes] = useState(session.notes || "");
   const done = session.status === "realizada";
+  const synced = googleConnected && !!session.googleEventId;
   return (
     <div
       style={{
@@ -1070,11 +1383,18 @@ function SessionRow({ session, patient, onToggleStatus, onNotesChange, onDelete 
             <div style={{ fontWeight: 700, fontSize: 14 }}>
               {fmtDateLong(session.date)} {session.time && `· ${session.time}`}
             </div>
-            <Badge tone={done ? "default" : "neutral"}>{done ? "realizada" : "agendada"}</Badge>
+            <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+              <Badge tone={done ? "default" : "neutral"}>{done ? "realizada" : "agendada"}</Badge>
+              {synced && (
+                <Badge tone="default">
+                  <CalendarCheck size={11} /> no Google Agenda
+                </Badge>
+              )}
+            </div>
           </div>
         </div>
         <div className="no-print" style={{ display: "flex", gap: 6 }}>
-          {!done && (
+          {!done && !synced && (
             <a href={googleCalendarLink(session, patient)} target="_blank" rel="noopener noreferrer">
               <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
                 <CalendarPlus size={13} /> Google Agenda
@@ -1154,11 +1474,15 @@ function AgendaView({ sessions, onOpenPatient }) {
                     </span>
                     <span style={{ fontWeight: 700, fontSize: 14, color: COLOR.ink }}>{s.patient.name}</span>
                   </button>
-                  <a href={googleCalendarLink(s, s.patient)} target="_blank" rel="noopener noreferrer">
-                    <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
-                      <CalendarPlus size={13} /> Google Agenda
-                    </Btn>
-                  </a>
+                  {s.googleEventId ? (
+                    <Badge tone="default"><CalendarCheck size={11} /> no Google Agenda</Badge>
+                  ) : (
+                    <a href={googleCalendarLink(s, s.patient)} target="_blank" rel="noopener noreferrer">
+                      <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
+                        <CalendarPlus size={13} /> Google Agenda
+                      </Btn>
+                    </a>
+                  )}
                 </div>
               ))}
           </div>
@@ -1170,7 +1494,17 @@ function AgendaView({ sessions, onOpenPatient }) {
 
 // ---------- modals ----------
 function AddPatientModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ name: "", phone: "", birthdate: "", diagnosis: "", planTotal: 10 });
+  const [form, setForm] = useState({
+    name: "",
+    phone: "",
+    birthdate: "",
+    diagnosis: "",
+    planTotal: 10,
+    height: "",
+    weight: "",
+    bodyFat: "",
+    muscleMass: "",
+  });
   const [error, setError] = useState("");
 
   function submit() {
@@ -1202,6 +1536,55 @@ function AddPatientModal({ onClose, onSave }) {
           minHeight={80}
         />
       </Field>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <Field label="Altura (cm)">
+          <input
+            type="number"
+            min={0}
+            max={250}
+            style={{ ...inputStyle, width: 90 }}
+            value={form.height}
+            onChange={(e) => setForm({ ...form, height: e.target.value })}
+            placeholder="172"
+          />
+        </Field>
+        <Field label="Peso (kg)">
+          <input
+            type="number"
+            min={0}
+            max={400}
+            step="0.1"
+            style={{ ...inputStyle, width: 90 }}
+            value={form.weight}
+            onChange={(e) => setForm({ ...form, weight: e.target.value })}
+            placeholder="78"
+          />
+        </Field>
+        <Field label="% de gordura">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step="0.1"
+            style={{ ...inputStyle, width: 90 }}
+            value={form.bodyFat}
+            onChange={(e) => setForm({ ...form, bodyFat: e.target.value })}
+            placeholder="18"
+          />
+        </Field>
+        <Field label="% de músculo">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step="0.1"
+            style={{ ...inputStyle, width: 90 }}
+            value={form.muscleMass}
+            onChange={(e) => setForm({ ...form, muscleMass: e.target.value })}
+            placeholder="42"
+          />
+        </Field>
+      </div>
       <Field label="Total de sessões do plano (0 a 20)">
         <input
           type="number"
@@ -1222,7 +1605,14 @@ function AddPatientModal({ onClose, onSave }) {
 }
 
 function AddSessionModal({ onClose, onSave }) {
-  const [form, setForm] = useState({ date: todayISO(), time: "09:00", status: "agendada", notes: "" });
+  const [form, setForm] = useState({
+    date: todayISO(),
+    time: "09:00",
+    status: "agendada",
+    notes: "",
+    repeat: "none",
+    repeatCount: 4,
+  });
   const [error, setError] = useState("");
 
   function submit() {
@@ -1230,7 +1620,26 @@ function AddSessionModal({ onClose, onSave }) {
       setError("Escolha uma data.");
       return;
     }
-    onSave(form);
+    const stepDays = form.repeat === "weekly" ? 7 : form.repeat === "biweekly" ? 14 : 0;
+    const count = form.repeat === "none" ? 1 : Math.max(2, Math.min(24, Number(form.repeatCount) || 2));
+    const base = new Date(form.date + "T00:00:00");
+
+    const sessions = [];
+    for (let i = 0; i < count; i++) {
+      const d = new Date(base.getTime() + i * stepDays * 86400000);
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+        d.getDate()
+      ).padStart(2, "0")}`;
+      sessions.push({
+        date: iso,
+        time: form.time,
+        // só a primeira ocorrência pode já vir marcada como "realizada";
+        // as próximas são sempre futuras, então ficam "agendada"
+        status: i === 0 ? form.status : "agendada",
+        notes: i === 0 ? form.notes : "",
+      });
+    }
+    onSave(sessions);
   }
 
   return (
@@ -1249,6 +1658,27 @@ function AddSessionModal({ onClose, onSave }) {
           <option value="realizada">Já realizada</option>
         </select>
       </Field>
+      <Field label="Repetir">
+        <select style={inputStyle} value={form.repeat} onChange={(e) => setForm({ ...form, repeat: e.target.value })}>
+          <option value="none">Não repetir — só esta sessão</option>
+          <option value="weekly">Semanalmente</option>
+          <option value="biweekly">A cada 15 dias</option>
+        </select>
+      </Field>
+      {form.repeat !== "none" && (
+        <Field label="Quantas sessões no total (incluindo essa)">
+          <input
+            type="number"
+            min={2}
+            max={24}
+            style={{ ...inputStyle, width: 100 }}
+            value={form.repeatCount}
+            onChange={(e) =>
+              setForm({ ...form, repeatCount: Math.max(2, Math.min(24, Number(e.target.value) || 2)) })
+            }
+          />
+        </Field>
+      )}
       <Field label="Evolução clínica (opcional)">
         <VoiceTextarea
           value={form.notes}

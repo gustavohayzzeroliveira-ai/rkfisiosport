@@ -79,6 +79,8 @@ GitHub.
      |---|---|
      | `VITE_SUPABASE_URL` | (cole o Project URL) |
      | `VITE_SUPABASE_ANON_KEY` | (cole a chave anon public) |
+     | `VITE_GOOGLE_CLIENT_ID` | (Client ID do Google Cloud, veja abaixo) |
+     | `VITE_GOOGLE_ALLOWED_EMAIL` | `kanu.hayzzer@gmail.com` |
 5. Clique em **Deploy** e espere 1–2 minutos.
 6. Pronto! A Vercel te dá um link do tipo
    `https://rkfisiosport.vercel.app` — esse é o endereço do seu app.
