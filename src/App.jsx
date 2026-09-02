@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, Plus, Search, Calendar, Activity, AlertTriangle, ChevronLeft,
   X, Check, Clock, FileText, Phone, Trash2, CalendarPlus, Users,
-  Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer, CalendarCheck
+  Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer, CalendarCheck,
+  ChevronDown, ChevronUp, Paperclip, UploadCloud, RefreshCw, History, Tag
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import {
@@ -13,6 +14,7 @@ import {
   updateGoogleEvent,
   deleteGoogleEvent,
 } from "./googleCalendar";
+import { uploadFile, deleteFile } from "./storage";
 
 // ---------- design tokens: RKFisioSport (azul ciano + verde) ----------
 const COLOR = {
@@ -59,12 +61,28 @@ function fmtDateLong(iso) {
 
 // Cada paciente carrega seu próprio array `sessions`, então a contagem abaixo
 // é sempre calculada isoladamente por paciente — nunca compartilhada entre eles.
+//
+// "cycle" identifica o ciclo/plano atual do paciente. Ao renovar o plano
+// (ver renewPlan), o ciclo avança e o contador de sessões realizadas "zera"
+// para o novo pacote — mas as sessões antigas continuam salvas no histórico,
+// só passam a contar para o ciclo anterior (ver planHistory).
+function currentCycle(p) {
+  return p.cycle || 1;
+}
+
 function sessionsRealizadas(p) {
-  return (p.sessions || []).filter((s) => s.status === "realizada").length;
+  const cycle = currentCycle(p);
+  return (p.sessions || []).filter((s) => s.status === "realizada" && (s.cycle || 1) === cycle).length;
 }
 
 function restantes(p) {
   return Math.max(0, (p.planTotal || 0) - sessionsRealizadas(p));
+}
+
+// Total histórico, somando todos os ciclos — usado em "avulso" e nas
+// estatísticas gerais do paciente.
+function totalSessionsRealizadas(p) {
+  return (p.sessions || []).filter((s) => s.status === "realizada").length;
 }
 
 function googleCalendarLink(session, patient) {
@@ -405,6 +423,174 @@ function Badge({ children, tone = "default" }) {
   );
 }
 
+// ---------- arquivos (fotos e exames) ----------
+function FileThumb({ file }) {
+  const isImage = (file.type || "").startsWith("image/");
+  return (
+    <a
+      href={file.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={file.name}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 4,
+        width: 78,
+        textDecoration: "none",
+        color: COLOR.ink,
+      }}
+    >
+      <div
+        style={{
+          width: 78,
+          height: 78,
+          borderRadius: 10,
+          border: `1px solid ${COLOR.border}`,
+          background: isImage ? `#fff url(${file.url}) center/cover no-repeat` : COLOR.cyanBg,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        {!isImage && <FileText size={22} style={{ color: COLOR.cyanDark }} />}
+      </div>
+      <span
+        style={{
+          fontSize: 10,
+          color: COLOR.inkLight,
+          textAlign: "center",
+          width: "100%",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {file.name}
+      </span>
+    </a>
+  );
+}
+
+// Bloco reaproveitado tanto no prontuário geral do paciente (fotos/exames
+// gerais) quanto dentro de cada sessão (fotos/exames daquela sessão
+// específica). onUpload/onDelete são passados pelo componente pai, que sabe
+// em qual lugar (paciente ou sessão) salvar a lista atualizada de arquivos.
+function FileManager({ files, onUpload, onDelete, label = "Fotos e arquivos de exames" }) {
+  const inputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleFiles(fileList) {
+    setError("");
+    setUploading(true);
+    try {
+      for (const file of Array.from(fileList)) {
+        await onUpload(file);
+      }
+    } catch (e) {
+      console.error("Erro ao enviar arquivo:", e);
+      setError("Não foi possível enviar o arquivo. Tente de novo.");
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
+        <div
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: COLOR.inkLight,
+            textTransform: "uppercase",
+            letterSpacing: 0.4,
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+          }}
+        >
+          <Paperclip size={13} /> {label}
+        </div>
+        <button
+          className="no-print"
+          type="button"
+          onClick={() => inputRef.current && inputRef.current.click()}
+          disabled={uploading}
+          style={{
+            background: "none",
+            border: "none",
+            cursor: uploading ? "default" : "pointer",
+            color: COLOR.cyanDark,
+            fontSize: 12,
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            opacity: uploading ? 0.6 : 1,
+            flexShrink: 0,
+          }}
+        >
+          {uploading ? (
+            <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />
+          ) : (
+            <UploadCloud size={13} />
+          )}
+          {uploading ? "Enviando…" : "Adicionar foto/arquivo"}
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept="image/*,.pdf,.doc,.docx"
+          className="no-print"
+          style={{ display: "none" }}
+          onChange={(e) => e.target.files && e.target.files.length && handleFiles(e.target.files)}
+        />
+      </div>
+      {error && <p style={{ color: COLOR.clayDark, fontSize: 12, marginTop: -4, marginBottom: 8 }}>{error}</p>}
+      {files && files.length > 0 ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          {files.map((f) => (
+            <div key={f.id} style={{ position: "relative" }}>
+              <FileThumb file={f} />
+              <button
+                className="no-print"
+                type="button"
+                onClick={() => onDelete(f)}
+                title="Remover arquivo"
+                style={{
+                  position: "absolute",
+                  top: -6,
+                  right: -6,
+                  width: 18,
+                  height: 18,
+                  borderRadius: "50%",
+                  border: "none",
+                  background: COLOR.clay,
+                  color: "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <X size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p style={{ fontSize: 12, color: COLOR.inkLight, margin: 0 }}>Nenhum arquivo ainda.</p>
+      )}
+    </div>
+  );
+}
+
 // ---------- main app ----------
 export default function ClinicaApp() {
   const [patients, setPatients] = useState(null); // null = loading
@@ -445,19 +631,24 @@ export default function ClinicaApp() {
   }
 
   function addPatient(data) {
+    const isAvulso = data.patientType === "avulso";
     const p = {
       id: uid(),
       name: data.name,
       phone: data.phone,
       birthdate: data.birthdate,
       diagnosis: data.diagnosis,
-      planTotal: Number(data.planTotal) || 0,
+      patientType: isAvulso ? "avulso" : "plano",
+      planTotal: isAvulso ? 0 : Number(data.planTotal) || 0,
       height: data.height || "",
       weight: data.weight || "",
       bodyFat: data.bodyFat || "",
       muscleMass: data.muscleMass || "",
       createdAt: todayISO(),
       sessions: [], // histórico de sessões exclusivo deste paciente
+      files: [], // fotos e arquivos de exames gerais do prontuário
+      cycle: 1, // ciclo do plano atual (avança a cada renovação)
+      planHistory: [], // registro dos ciclos/planos anteriores já concluídos
     };
     persist([p, ...patients]);
     setShowAddPatient(false);
@@ -516,7 +707,13 @@ export default function ClinicaApp() {
           setGoogleConnected(isGoogleConnected());
         }
       }
-      newSessions.push({ id: uid(), ...session, googleEventId });
+      newSessions.push({
+        id: uid(),
+        ...session,
+        googleEventId,
+        cycle: patient ? currentCycle(patient) : 1,
+        files: [],
+      });
     }
     if (syncFailed) {
       setGoogleError(
@@ -581,6 +778,78 @@ export default function ClinicaApp() {
           : p
       )
     );
+  }
+
+  // Renova o plano do paciente: arquiva o ciclo atual no histórico (com a
+  // contagem de sessões realizadas nele) e avança para um novo ciclo com o
+  // total de sessões informado. As sessões antigas continuam salvas — só
+  // deixam de contar no contador principal, e ficam acessíveis em
+  // "ciclos anteriores".
+  function renewPlan(patientId, newTotal) {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) return;
+    const entry = {
+      id: uid(),
+      cycle: currentCycle(patient),
+      planTotal: patient.planTotal || 0,
+      sessionsRealizadas: sessionsRealizadas(patient),
+      renewedAt: todayISO(),
+    };
+    updatePatient(patientId, {
+      planHistory: [...(patient.planHistory || []), entry],
+      cycle: currentCycle(patient) + 1,
+      planTotal: Number(newTotal) || 0,
+    });
+  }
+
+  async function addPatientFile(patientId, file) {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) return;
+    const meta = await uploadFile(file, `pacientes/${patientId}`);
+    updatePatient(patientId, { files: [...(patient.files || []), meta] });
+  }
+
+  async function deletePatientFile(patientId, file) {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) return;
+    updatePatient(patientId, { files: (patient.files || []).filter((f) => f.id !== file.id) });
+    deleteFile(file.path);
+  }
+
+  async function addSessionFile(patientId, sessionId, file) {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) return;
+    const meta = await uploadFile(file, `pacientes/${patientId}/sessoes/${sessionId}`);
+    persist(
+      patients.map((p) =>
+        p.id === patientId
+          ? {
+              ...p,
+              sessions: p.sessions.map((s) =>
+                s.id === sessionId ? { ...s, files: [...(s.files || []), meta] } : s
+              ),
+            }
+          : p
+      )
+    );
+  }
+
+  async function deleteSessionFile(patientId, sessionId, file) {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) return;
+    persist(
+      patients.map((p) =>
+        p.id === patientId
+          ? {
+              ...p,
+              sessions: p.sessions.map((s) =>
+                s.id === sessionId ? { ...s, files: (s.files || []).filter((f) => f.id !== file.id) } : s
+              ),
+            }
+          : p
+      )
+    );
+    deleteFile(file.path);
   }
 
   const filtered = useMemo(() => {
@@ -800,6 +1069,11 @@ export default function ClinicaApp() {
             onUpdateSession={(sid, patch) => updateSession(selected.id, sid, patch)}
             onDeleteSession={(sid) => deleteSession(selected.id, sid)}
             onDelete={() => setConfirmDelete(selected.id)}
+            onRenewPlan={(newTotal) => renewPlan(selected.id, newTotal)}
+            onAddPatientFile={(file) => addPatientFile(selected.id, file)}
+            onDeletePatientFile={(file) => deletePatientFile(selected.id, file)}
+            onAddSessionFile={(sid, file) => addSessionFile(selected.id, sid, file)}
+            onDeleteSessionFile={(sid, file) => deleteSessionFile(selected.id, sid, file)}
             googleConnected={googleConnected}
           />
         )}
@@ -905,9 +1179,11 @@ function PacientesList({ patients, totalCount, alertCount, query, setQuery, onOp
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 }}>
           {patients.map((p) => {
+            const isAvulso = p.patientType === "avulso";
             const used = sessionsRealizadas(p);
+            const totalUsed = totalSessionsRealizadas(p);
             const rem = restantes(p);
-            const alert = p.planTotal > 0 && rem <= 2;
+            const alert = !isAvulso && p.planTotal > 0 && rem <= 2;
             const nextSession = (p.sessions || [])
               .filter((s) => s.status === "agendada")
               .sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")))[0];
@@ -928,34 +1204,61 @@ function PacientesList({ patients, totalCount, alertCount, query, setQuery, onOp
                   gap: 8,
                 }}
               >
-                <GoniometerArc value={used} max={p.planTotal} size={92} />
+                {isAvulso ? (
+                  <div
+                    style={{
+                      width: 92,
+                      height: 58,
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 2,
+                    }}
+                  >
+                    <div style={{ fontFamily: FONT_MONO, fontSize: 22, fontWeight: 700, color: COLOR.cyanDark }}>
+                      {totalUsed}
+                    </div>
+                    <div style={{ fontSize: 10, color: COLOR.inkLight }}>sessões avulsas</div>
+                  </div>
+                ) : (
+                  <GoniometerArc value={used} max={p.planTotal} size={92} />
+                )}
                 <div style={{ textAlign: "center", width: "100%" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginBottom: 2 }}>
                     <span style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</span>
-                    <span
-                      title="Sessões já realizadas"
-                      style={{
-                        fontFamily: FONT_MONO,
-                        fontSize: 11,
-                        fontWeight: 700,
-                        color: COLOR.sageDark,
-                        background: COLOR.sageBg,
-                        borderRadius: 999,
-                        padding: "1px 7px",
-                        flexShrink: 0,
-                      }}
-                    >
-                      {used}
-                    </span>
+                    {!isAvulso && (
+                      <span
+                        title="Sessões já realizadas"
+                        style={{
+                          fontFamily: FONT_MONO,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: COLOR.sageDark,
+                          background: COLOR.sageBg,
+                          borderRadius: 999,
+                          padding: "1px 7px",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {used}
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 12, color: COLOR.inkLight, marginBottom: 6, minHeight: 16 }}>
                     {p.diagnosis || "—"}
                   </div>
+                  {isAvulso && <Badge tone="neutral"><Tag size={11} /> avulso</Badge>}
                   {alert && <Badge tone="alert"><AlertTriangle size={11} /> plano acabando</Badge>}
-                  {!alert && nextSession && (
+                  {!isAvulso && !alert && nextSession && (
                     <Badge tone="default"><Clock size={11} /> {fmtDate(nextSession.date)}</Badge>
                   )}
-                  {!alert && !nextSession && p.planTotal > 0 && rem === 0 && (
+                  {isAvulso && nextSession && (
+                    <div style={{ marginTop: 4 }}>
+                      <Badge tone="default"><Clock size={11} /> {fmtDate(nextSession.date)}</Badge>
+                    </div>
+                  )}
+                  {!isAvulso && !alert && !nextSession && p.planTotal > 0 && rem === 0 && (
                     <Badge tone="neutral">plano concluído</Badge>
                   )}
                 </div>
@@ -990,23 +1293,57 @@ function EmptyState({ icon: Icon, title, body, action }) {
 }
 
 // ---------- patient detail ----------
-function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSession, onDeleteSession, onDelete, googleConnected }) {
+function PatientDetail({
+  patient,
+  onBack,
+  onUpdate,
+  onAddSession,
+  onUpdateSession,
+  onDeleteSession,
+  onDelete,
+  onRenewPlan,
+  onAddPatientFile,
+  onDeletePatientFile,
+  onAddSessionFile,
+  onDeleteSessionFile,
+  googleConnected,
+}) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(patient);
   const [showAtestado, setShowAtestado] = useState(false);
+  const [showRenew, setShowRenew] = useState(false);
+  const [showFinished, setShowFinished] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   useEffect(() => {
     setDraft(patient);
     setEditing(false);
     setShowAtestado(false);
+    setShowRenew(false);
+    setShowFinished(false);
+    setShowHistory(false);
   }, [patient.id]);
 
+  const isAvulso = patient.patientType === "avulso";
   const used = sessionsRealizadas(patient);
   const rem = restantes(patient);
-  const alert = patient.planTotal > 0 && rem <= 2;
-  const sortedSessions = [...(patient.sessions || [])].sort((a, b) =>
-    (b.date + (b.time || "")).localeCompare(a.date + (a.time || ""))
-  );
+  const alert = !isAvulso && patient.planTotal > 0 && rem <= 2;
+  const planFinished = !isAvulso && patient.planTotal > 0 && rem === 0;
+  const cycle = currentCycle(patient);
+
+  // Sessões do ciclo/plano atual (as que contam no contador), separadas em
+  // agendadas (mostradas sempre) e realizadas (minimizadas por padrão — só
+  // um resumo com contagem, que abre ao clicar). Sessões de ciclos
+  // anteriores ficam à parte, em "ciclos anteriores".
+  const currentCycleSessions = (patient.sessions || []).filter((s) => (s.cycle || 1) === cycle);
+  const pastCycleSessions = (patient.sessions || []).filter((s) => (s.cycle || 1) !== cycle);
+
+  const upcoming = [...currentCycleSessions]
+    .filter((s) => s.status !== "realizada")
+    .sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")));
+  const finished = [...currentCycleSessions]
+    .filter((s) => s.status === "realizada")
+    .sort((a, b) => (b.date + (b.time || "")).localeCompare(a.date + (a.time || "")));
 
   if (showAtestado) {
     return <AtestadoView patient={patient} onBack={() => setShowAtestado(false)} />;
@@ -1018,7 +1355,8 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
       phone: draft.phone,
       birthdate: draft.birthdate,
       diagnosis: draft.diagnosis,
-      planTotal: Number(draft.planTotal) || 0,
+      patientType: draft.patientType === "avulso" ? "avulso" : "plano",
+      planTotal: draft.patientType === "avulso" ? 0 : Number(draft.planTotal) || 0,
       height: draft.height || "",
       weight: draft.weight || "",
       bodyFat: draft.bodyFat || "",
@@ -1074,6 +1412,34 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
               <div style={{ flex: 1, marginRight: 12 }}>
                 <Field label="Nome">
                   <input style={inputStyle} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+                </Field>
+                <Field label="Tipo de atendimento">
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {[
+                      { id: "plano", label: "Pacote de sessões (plano)" },
+                      { id: "avulso", label: "Sessão avulsa (sem plano)" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setDraft({ ...draft, patientType: opt.id })}
+                        style={{
+                          flex: 1,
+                          fontFamily: FONT_BODY,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          padding: "9px 8px",
+                          borderRadius: 7,
+                          cursor: "pointer",
+                          border: `1px solid ${(draft.patientType || "plano") === opt.id ? COLOR.cyanDark : COLOR.border}`,
+                          background: (draft.patientType || "plano") === opt.id ? COLOR.cyanBg : "#fff",
+                          color: (draft.patientType || "plano") === opt.id ? COLOR.cyanDark : COLOR.inkLight,
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </Field>
                 <div style={{ display: "flex", gap: 10 }}>
                   <Field label="Telefone">
@@ -1163,7 +1529,7 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
             )}
           </div>
 
-          {editing && (
+          {editing && (draft.patientType || "plano") !== "avulso" && (
             <div style={{ marginTop: 14 }}>
               <Field label="Total de sessões do plano (0 a 20)">
                 <input
@@ -1177,6 +1543,29 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
               </Field>
             </div>
           )}
+
+          <div className="no-print" style={{ marginTop: 16, borderTop: `1px solid ${COLOR.border}`, paddingTop: 16 }}>
+            <FileManager
+              files={patient.files || []}
+              onUpload={onAddPatientFile}
+              onDelete={onDeletePatientFile}
+              label="Fotos e arquivos de exames do paciente"
+            />
+          </div>
+          <div className="print-only" style={{ marginTop: 16, borderTop: `1px solid ${COLOR.border}`, paddingTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: COLOR.inkLight, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+              Arquivos e exames anexados
+            </div>
+            {(patient.files || []).length > 0 ? (
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                {(patient.files || []).map((f) => (
+                  <li key={f.id}>{f.name}</li>
+                ))}
+              </ul>
+            ) : (
+              <p style={{ fontSize: 13, color: COLOR.inkLight, margin: 0 }}>Nenhum arquivo anexado.</p>
+            )}
+          </div>
         </div>
 
         <div
@@ -1192,17 +1581,109 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
             gap: 8,
           }}
         >
-          {/* Contador de sessões individual deste paciente — lido direto de patient.sessions */}
-          <GoniometerArc value={used} max={patient.planTotal} size={110} />
-          {alert ? (
-            <Badge tone="alert"><AlertTriangle size={11} /> restam {rem} sessões</Badge>
-          ) : patient.planTotal > 0 && rem === 0 ? (
-            <Badge tone="neutral">plano concluído</Badge>
+          {isAvulso ? (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "10px 0" }}>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 34, fontWeight: 700, color: COLOR.cyanDark }}>
+                  {totalSessionsRealizadas(patient)}
+                </div>
+                <div style={{ fontSize: 12, color: COLOR.inkLight }}>sessões registradas</div>
+              </div>
+              <Badge tone="neutral"><Tag size={11} /> avulso — sem plano</Badge>
+            </>
           ) : (
-            <Badge tone="default">plano em dia</Badge>
+            <>
+              {/* Contador de sessões individual deste paciente e ciclo atual */}
+              <GoniometerArc value={used} max={patient.planTotal} size={110} />
+              {alert ? (
+                <Badge tone="alert"><AlertTriangle size={11} /> restam {rem} sessões</Badge>
+              ) : planFinished ? (
+                <Badge tone="neutral">plano concluído</Badge>
+              ) : (
+                <Badge tone="default">plano em dia</Badge>
+              )}
+              {cycle > 1 && (
+                <span style={{ fontSize: 11, color: COLOR.inkLight }}>ciclo #{cycle}</span>
+              )}
+              <span className="no-print" style={{ width: "100%" }}>
+                <Btn
+                  variant={planFinished ? "sage" : "outline"}
+                  style={{ width: "100%", justifyContent: "center", fontSize: 12, padding: "7px 8px" }}
+                  onClick={() => setShowRenew(true)}
+                >
+                  <RefreshCw size={13} /> Renovar plano
+                </Btn>
+              </span>
+              {(patient.planHistory || []).length > 0 && (
+                <button
+                  className="no-print"
+                  type="button"
+                  onClick={() => setShowHistory((v) => !v)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    color: COLOR.inkLight,
+                    fontSize: 11,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: 0,
+                  }}
+                >
+                  <History size={12} />
+                  {(patient.planHistory || []).length} ciclo(s) anterior(es)
+                  {showHistory ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
+
+      {showHistory && (patient.planHistory || []).length > 0 && (
+        <div
+          className="no-print"
+          style={{
+            background: COLOR.paperRaised,
+            border: `1px solid ${COLOR.border}`,
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 20,
+          }}
+        >
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 15, marginBottom: 10 }}>Ciclos anteriores</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[...(patient.planHistory || [])].reverse().map((h) => (
+              <div
+                key={h.id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  fontSize: 13,
+                  padding: "8px 10px",
+                  background: COLOR.paper,
+                  borderRadius: 8,
+                }}
+              >
+                <span>Ciclo #{h.cycle} — {h.sessionsRealizadas}/{h.planTotal} sessões</span>
+                <span style={{ color: COLOR.inkLight }}>renovado em {fmtDate(h.renewedAt)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showRenew && (
+        <RenewPlanModal
+          currentTotal={patient.planTotal}
+          onClose={() => setShowRenew(false)}
+          onConfirm={(newTotal) => {
+            onRenewPlan(newTotal);
+            setShowRenew(false);
+          }}
+        />
+      )}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h3 style={{ fontFamily: FONT_DISPLAY, fontSize: 17, margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
@@ -1211,7 +1692,7 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
         <span className="no-print"><Btn onClick={onAddSession}><Plus size={14} /> Registrar sessão</Btn></span>
       </div>
 
-      {sortedSessions.length === 0 ? (
+      {currentCycleSessions.length === 0 && pastCycleSessions.length === 0 ? (
         <EmptyState
           icon={Activity}
           title="Nenhuma sessão registrada"
@@ -1219,23 +1700,155 @@ function PatientDetail({ patient, onBack, onUpdate, onAddSession, onUpdateSessio
           action={<Btn onClick={onAddSession}><Plus size={14} /> Registrar sessão</Btn>}
         />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {sortedSessions.map((s) => (
-            <SessionRow
-              key={s.id}
-              session={s}
-              patient={patient}
-              googleConnected={googleConnected}
-              onToggleStatus={() =>
-                onUpdateSession(s.id, { status: s.status === "realizada" ? "agendada" : "realizada" })
-              }
-              onNotesChange={(notes) => onUpdateSession(s.id, { notes })}
-              onDelete={() => onDeleteSession(s.id)}
-            />
-          ))}
-        </div>
+        <>
+          {upcoming.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: finished.length > 0 ? 14 : 0 }}>
+              {upcoming.map((s) => (
+                <SessionRow
+                  key={s.id}
+                  session={s}
+                  patient={patient}
+                  googleConnected={googleConnected}
+                  defaultOpen
+                  onToggleStatus={() =>
+                    onUpdateSession(s.id, { status: s.status === "realizada" ? "agendada" : "realizada" })
+                  }
+                  onNotesChange={(notes) => onUpdateSession(s.id, { notes })}
+                  onDelete={() => onDeleteSession(s.id)}
+                  onAddFile={(file) => onAddSessionFile(s.id, file)}
+                  onDeleteFile={(file) => onDeleteSessionFile(s.id, file)}
+                />
+              ))}
+            </div>
+          )}
+
+          {finished.length > 0 && (
+            <div>
+              <button
+                type="button"
+                className="no-print"
+                onClick={() => setShowFinished((v) => !v)}
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  background: COLOR.paperRaised,
+                  border: `1px solid ${COLOR.border}`,
+                  borderRadius: 10,
+                  padding: "10px 14px",
+                  cursor: "pointer",
+                  fontFamily: FONT_BODY,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: COLOR.ink,
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Check size={14} style={{ color: COLOR.sage }} />
+                  {finished.length} sessão(ões) já finalizada(s)
+                </span>
+                {showFinished ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </button>
+              <div className="print-only" style={{ marginTop: 10 }} />
+              {showFinished && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
+                  {finished.map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      patient={patient}
+                      googleConnected={googleConnected}
+                      onToggleStatus={() =>
+                        onUpdateSession(s.id, { status: s.status === "realizada" ? "agendada" : "realizada" })
+                      }
+                      onNotesChange={(notes) => onUpdateSession(s.id, { notes })}
+                      onDelete={() => onDeleteSession(s.id)}
+                      onAddFile={(file) => onAddSessionFile(s.id, file)}
+                      onDeleteFile={(file) => onDeleteSessionFile(s.id, file)}
+                    />
+                  ))}
+                </div>
+              )}
+              {/* impressão: sessões finalizadas sempre aparecem inteiras no papel, mesmo com o acordeão fechado na tela */}
+              {!showFinished && (
+                <div className="print-only" style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
+                  {finished.map((s) => (
+                    <SessionRow
+                      key={"print-" + s.id}
+                      session={s}
+                      patient={patient}
+                      googleConnected={googleConnected}
+                      defaultOpen
+                      onToggleStatus={() => {}}
+                      onNotesChange={() => {}}
+                      onDelete={() => {}}
+                      onAddFile={() => {}}
+                      onDeleteFile={() => {}}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {pastCycleSessions.length > 0 && (
+            <div className="no-print" style={{ marginTop: 18 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLOR.inkLight, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>
+                Sessões de ciclos anteriores
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, opacity: 0.85 }}>
+                {[...pastCycleSessions]
+                  .sort((a, b) => (b.date + (b.time || "")).localeCompare(a.date + (a.time || "")))
+                  .map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      patient={patient}
+                      googleConnected={googleConnected}
+                      onToggleStatus={() =>
+                        onUpdateSession(s.id, { status: s.status === "realizada" ? "agendada" : "realizada" })
+                      }
+                      onNotesChange={(notes) => onUpdateSession(s.id, { notes })}
+                      onDelete={() => onDeleteSession(s.id)}
+                      onAddFile={(file) => onAddSessionFile(s.id, file)}
+                      onDeleteFile={(file) => onDeleteSessionFile(s.id, file)}
+                    />
+                  ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+// Modal simples para renovar o plano: mostra quantas sessões o ciclo atual
+// já usou e pede o novo total de sessões do próximo pacote.
+function RenewPlanModal({ currentTotal, onClose, onConfirm }) {
+  const [total, setTotal] = useState(currentTotal || 10);
+  return (
+    <Modal title="Renovar plano" onClose={onClose} width={380}>
+      <p style={{ fontSize: 13, color: COLOR.inkLight, lineHeight: 1.5, marginTop: 0 }}>
+        Isso inicia um novo ciclo de sessões para este paciente. O histórico do plano
+        anterior fica salvo em "ciclos anteriores" — nada é apagado.
+      </p>
+      <Field label="Total de sessões do novo plano (0 a 20)">
+        <input
+          type="number"
+          min={0}
+          max={20}
+          style={{ ...inputStyle, width: 100 }}
+          value={total}
+          onChange={(e) => setTotal(Math.max(0, Math.min(20, Number(e.target.value))))}
+        />
+      </Field>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <Btn variant="outline" onClick={onClose}>Cancelar</Btn>
+        <Btn onClick={() => onConfirm(total)}><RefreshCw size={14} /> Renovar plano</Btn>
+      </div>
+    </Modal>
   );
 }
 
@@ -1354,10 +1967,19 @@ function AtestadoView({ patient, onBack }) {
   );
 }
 
-function SessionRow({ session, patient, googleConnected, onToggleStatus, onNotesChange, onDelete }) {
+// Cada sessão pode ficar minimizada (só a linha com data/status, útil para
+// não poluir a tela com muitas sessões já finalizadas) ou expandida, com a
+// evolução clínica escrita por completo e os arquivos/fotos anexados. Sessões
+// agendadas abrem expandidas por padrão (defaultOpen); as já finalizadas
+// começam minimizadas e o usuário clica para abrir e ver o que foi escrito.
+function SessionRow({ session, patient, googleConnected, defaultOpen = false, onToggleStatus, onNotesChange, onDelete, onAddFile, onDeleteFile }) {
   const [notes, setNotes] = useState(session.notes || "");
+  const [open, setOpen] = useState(defaultOpen);
   const done = session.status === "realizada";
   const synced = googleConnected && !!session.googleEventId;
+  const fileCount = (session.files || []).length;
+  const hasNotes = !!(session.notes && session.notes.trim());
+
   return (
     <div
       style={{
@@ -1368,9 +1990,28 @@ function SessionRow({ session, patient, googleConnected, onToggleStatus, onNotes
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <button
-            onClick={onToggleStatus}
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="no-print"
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            padding: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            textAlign: "left",
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleStatus();
+            }}
             title={done ? "Marcar como agendada" : "Marcar como realizada"}
             style={{
               width: 24,
@@ -1387,22 +2028,39 @@ function SessionRow({ session, patient, googleConnected, onToggleStatus, onNotes
             }}
           >
             {done && <Check size={14} />}
-          </button>
-          <div>
+          </span>
+          <span style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 700, fontSize: 14 }}>
               {fmtDateLong(session.date)} {session.time && `· ${session.time}`}
             </div>
-            <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+            <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
               <Badge tone={done ? "default" : "neutral"}>{done ? "realizada" : "agendada"}</Badge>
               {synced && (
                 <Badge tone="default">
                   <CalendarCheck size={11} /> no Google Agenda
                 </Badge>
               )}
+              {fileCount > 0 && (
+                <Badge tone="neutral"><Paperclip size={11} /> {fileCount}</Badge>
+              )}
+              {!open && hasNotes && (
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: COLOR.inkLight,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 260,
+                  }}
+                >
+                  {session.notes}
+                </span>
+              )}
             </div>
-          </div>
-        </div>
-        <div className="no-print" style={{ display: "flex", gap: 6 }}>
+          </span>
+        </button>
+        <div className="no-print" style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
           {!done && !synced && (
             <a href={googleCalendarLink(session, patient)} target="_blank" rel="noopener noreferrer">
               <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
@@ -1413,16 +2071,46 @@ function SessionRow({ session, patient, googleConnected, onToggleStatus, onNotes
           <Btn variant="danger" style={{ padding: "6px 8px" }} onClick={onDelete}>
             <Trash2 size={13} />
           </Btn>
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            title={open ? "Minimizar" : "Ver detalhes"}
+            style={{ background: "none", border: "none", cursor: "pointer", color: COLOR.inkLight, padding: 4 }}
+          >
+            {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </button>
         </div>
       </div>
-      <div style={{ marginTop: 10 }}>
-        <VoiceTextarea
-          value={notes}
-          onChange={setNotes}
-          onBlur={() => onNotesChange(notes)}
-          placeholder="Evolução clínica desta sessão…"
-          minHeight={50}
-        />
+
+      {/* impressão sempre mostra tudo, independente do estado aberto/fechado na tela */}
+      <div className={open ? "" : "print-only"} style={{ marginTop: 10 }}>
+        <div className="no-print">
+          <VoiceTextarea
+            value={notes}
+            onChange={setNotes}
+            onBlur={() => onNotesChange(notes)}
+            placeholder="Evolução clínica desta sessão…"
+            minHeight={50}
+          />
+        </div>
+        <p className="print-only" style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", margin: "0 0 6px" }}>
+          {session.notes || "Sem anotações."}
+        </p>
+        <div className="no-print" style={{ marginTop: 10 }}>
+          <FileManager
+            files={session.files || []}
+            onUpload={onAddFile}
+            onDelete={onDeleteFile}
+            label="Fotos e arquivos desta sessão"
+          />
+        </div>
+        {fileCount > 0 && (
+          <ul className="print-only" style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12 }}>
+            {(session.files || []).map((f) => (
+              <li key={f.id}>{f.name}</li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );
@@ -1508,6 +2196,7 @@ function AddPatientModal({ onClose, onSave }) {
     phone: "",
     birthdate: "",
     diagnosis: "",
+    patientType: "plano",
     planTotal: 10,
     height: "",
     weight: "",
@@ -1528,6 +2217,34 @@ function AddPatientModal({ onClose, onSave }) {
     <Modal title="Novo paciente" onClose={onClose}>
       <Field label="Nome completo">
         <input style={inputStyle} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Maria da Silva" />
+      </Field>
+      <Field label="Tipo de atendimento">
+        <div style={{ display: "flex", gap: 8 }}>
+          {[
+            { id: "plano", label: "Pacote de sessões (plano)" },
+            { id: "avulso", label: "Sessão avulsa (sem plano)" },
+          ].map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setForm({ ...form, patientType: opt.id })}
+              style={{
+                flex: 1,
+                fontFamily: FONT_BODY,
+                fontSize: 12,
+                fontWeight: 600,
+                padding: "9px 8px",
+                borderRadius: 7,
+                cursor: "pointer",
+                border: `1px solid ${form.patientType === opt.id ? COLOR.cyanDark : COLOR.border}`,
+                background: form.patientType === opt.id ? COLOR.cyanBg : "#fff",
+                color: form.patientType === opt.id ? COLOR.cyanDark : COLOR.inkLight,
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </Field>
       <div style={{ display: "flex", gap: 10 }}>
         <Field label="Telefone">
@@ -1594,16 +2311,22 @@ function AddPatientModal({ onClose, onSave }) {
           />
         </Field>
       </div>
-      <Field label="Total de sessões do plano (0 a 20)">
-        <input
-          type="number"
-          min={0}
-          max={20}
-          style={{ ...inputStyle, width: 100 }}
-          value={form.planTotal}
-          onChange={(e) => setForm({ ...form, planTotal: Math.max(0, Math.min(20, Number(e.target.value))) })}
-        />
-      </Field>
+      {form.patientType === "avulso" ? (
+        <p style={{ fontSize: 12, color: COLOR.inkLight, margin: "0 0 14px", background: COLOR.cyanBg, padding: "8px 10px", borderRadius: 7 }}>
+          Paciente avulso: sem pacote de sessões. Você registra e acompanha as sessões normalmente, sem contador de plano.
+        </p>
+      ) : (
+        <Field label="Total de sessões do plano (0 a 20)">
+          <input
+            type="number"
+            min={0}
+            max={20}
+            style={{ ...inputStyle, width: 100 }}
+            value={form.planTotal}
+            onChange={(e) => setForm({ ...form, planTotal: Math.max(0, Math.min(20, Number(e.target.value))) })}
+          />
+        </Field>
+      )}
       {error && <p style={{ color: COLOR.clayDark, fontSize: 13, marginTop: -6 }}>{error}</p>}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
         <Btn variant="outline" onClick={onClose}>Cancelar</Btn>

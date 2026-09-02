@@ -1,5 +1,32 @@
 # RKFisioSport — Prontuários
 
+## Novidades desta versão
+
+- **Renovação de plano**: quando o pacote de sessões de um paciente termina
+  (ou a qualquer momento), dá para clicar em **Renovar plano** e começar um
+  novo ciclo com um novo total de sessões. O histórico do plano anterior fica
+  salvo em "ciclos anteriores" — nada é apagado.
+- **Sessões minimizadas**: sessões já finalizadas ficam recolhidas por
+  padrão, num resumo "X sessão(ões) já finalizada(s)". Clique para abrir e
+  ver a evolução clínica completa e os arquivos daquela sessão.
+- **Paciente avulso (sem plano)**: ao cadastrar (ou editar) um paciente, dá
+  para escolher **Sessão avulsa (sem plano)** — para quem não tem pacote
+  fechado, mas você ainda precisa registrar as sessões e evoluções dele.
+- **Fotos e arquivos de exames**: tanto no prontuário geral do paciente
+  quanto em cada sessão, dá para anexar fotos e arquivos (PDF, imagens,
+  Word). Ficam guardados no Supabase Storage e aparecem como miniaturas,
+  clicáveis para abrir/baixar.
+- **Prontuário completo na impressão**: a versão impressa (botão
+  **Imprimir**) agora mostra todo o texto escrito e a lista de arquivos
+  anexados de cada sessão, mesmo que ela esteja minimizada na tela.
+
+Se você já tinha o app publicado antes dessa atualização, depois de subir o
+código novo, rode de novo o `supabase-setup.sql` no **SQL Editor** do
+Supabase — ele detecta o que já existe e só cria o que falta (o bucket de
+arquivos `arquivos`, usado pelas fotos e exames).
+
+---
+
 App de prontuário e controle de sessões para a clínica. Este pacote já vem
 pronto para publicar num link próprio, acessível de qualquer computador,
 celular ou tablet, com os dados sincronizados entre eles.
