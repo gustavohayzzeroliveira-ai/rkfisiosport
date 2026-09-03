@@ -2,6 +2,25 @@
 
 ## Novidades desta versão
 
+- **Trocar horário fácil**: cada sessão (mesmo já marcada) tem um botão
+  **Trocar horário**, tanto no prontuário do paciente quanto na aba
+  **Agenda**. O app não deixa salvar um horário que já esteja ocupado por
+  outro paciente — mostra quem está lá e pede pra escolher outro.
+- **Repetição personalizada**: além de semanal e a cada 15 dias, dá pra
+  marcar sessões recorrentes escolhendo exatamente quais dias da semana
+  (ex.: toda segunda, quarta e sexta) e quantas sessões no total.
+- **Pressão arterial e IMC por sessão**: toda sessão marcada como
+  "realizada" ganhou um campo para anotar a pressão arterial e o IMC
+  daquele dia (com um atalho para calcular o IMC a partir da altura/peso
+  do prontuário, se já estiverem preenchidos).
+- **Correções**: botão de editar prontuário agora tem "Cancelar" (antes não
+  dava pra desistir da edição sem salvar); exclusão de sessão e de
+  arquivos agora pede confirmação; pequeno ajuste visual nos botões.
+
+
+
+## Novidades desta versão
+
 - **Renovação de plano**: quando o pacote de sessões de um paciente termina
   (ou a qualquer momento), dá para clicar em **Renovar plano** e começar um
   novo ciclo com um novo total de sessões. O histórico do plano anterior fica

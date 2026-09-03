@@ -3,7 +3,8 @@ import {
   User, Plus, Search, Calendar, Activity, AlertTriangle, ChevronLeft,
   X, Check, Clock, FileText, Phone, Trash2, CalendarPlus, Users,
   Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer, CalendarCheck,
-  ChevronDown, ChevronUp, Paperclip, UploadCloud, RefreshCw, History, Tag
+  ChevronDown, ChevronUp, Paperclip, UploadCloud, RefreshCw, History, Tag,
+  Pencil, HeartPulse, Scale
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import {
@@ -83,6 +84,24 @@ function restantes(p) {
 // estatísticas gerais do paciente.
 function totalSessionsRealizadas(p) {
   return (p.sessions || []).filter((s) => s.status === "realizada").length;
+}
+
+// Procura, entre TODOS os pacientes, uma sessão "agendada" na mesma data e
+// horário — usado para impedir marcar duas pessoas ao mesmo tempo.
+// excludeSessionId serve para não conflitar consigo mesma ao editar/trocar
+// o horário de uma sessão já existente.
+function findConflict(patients, date, time, excludeSessionId) {
+  if (!date || !time) return null;
+  for (const p of patients || []) {
+    for (const s of p.sessions || []) {
+      if (excludeSessionId && s.id === excludeSessionId) continue;
+      if (s.status !== "agendada") continue;
+      if (s.date === date && s.time === time) {
+        return { patientName: p.name, session: s };
+      }
+    }
+  }
+  return null;
 }
 
 function googleCalendarLink(session, patient) {
@@ -213,6 +232,7 @@ function Btn({ children, onClick, variant = "default", style, type = "button", d
       style={{ ...base, ...variants[variant], ...style }}
       onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.97)")}
       onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+      onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
     >
       {children}
     </button>
@@ -561,7 +581,9 @@ function FileManager({ files, onUpload, onDelete, label = "Fotos e arquivos de e
               <button
                 className="no-print"
                 type="button"
-                onClick={() => onDelete(f)}
+                onClick={() => {
+                  if (window.confirm(`Remover o arquivo "${f.name}"?`)) onDelete(f);
+                }}
                 title="Remover arquivo"
                 style={{
                   position: "absolute",
@@ -852,6 +874,12 @@ export default function ClinicaApp() {
     deleteFile(file.path);
   }
 
+  // Checagem de conflito de horário usada tanto para novas sessões quanto
+  // para trocar o horário de uma já existente (ver findConflict acima).
+  function checkTimeConflict(date, time, excludeSessionId) {
+    return findConflict(patients, date, time, excludeSessionId);
+  }
+
   const filtered = useMemo(() => {
     if (!patients) return [];
     const q = query.trim().toLowerCase();
@@ -1074,15 +1102,21 @@ export default function ClinicaApp() {
             onDeletePatientFile={(file) => deletePatientFile(selected.id, file)}
             onAddSessionFile={(sid, file) => addSessionFile(selected.id, sid, file)}
             onDeleteSessionFile={(sid, file) => deleteSessionFile(selected.id, sid, file)}
+            onCheckConflict={checkTimeConflict}
             googleConnected={googleConnected}
           />
         )}
 
         {tab === "agenda" && (
-          <AgendaView sessions={upcomingSessions} onOpenPatient={(id) => {
-            setTab("pacientes");
-            setSelectedId(id);
-          }} />
+          <AgendaView
+            sessions={upcomingSessions}
+            onOpenPatient={(id) => {
+              setTab("pacientes");
+              setSelectedId(id);
+            }}
+            onCheckConflict={checkTimeConflict}
+            onChangeTime={(patientId, sessionId, date, time) => updateSession(patientId, sessionId, { date, time })}
+          />
         )}
       </div>
 
@@ -1094,6 +1128,7 @@ export default function ClinicaApp() {
         <AddSessionModal
           onClose={() => setSessionModalFor(null)}
           onSave={(sessionsList) => addSessions(sessionModalFor, sessionsList)}
+          onCheckConflict={checkTimeConflict}
         />
       )}
 
@@ -1306,6 +1341,7 @@ function PatientDetail({
   onDeletePatientFile,
   onAddSessionFile,
   onDeleteSessionFile,
+  onCheckConflict,
   googleConnected,
 }) {
   const [editing, setEditing] = useState(false);
@@ -1505,7 +1541,18 @@ function PatientDetail({
               {!editing ? (
                 <Btn variant="outline" onClick={() => setEditing(true)}>Editar</Btn>
               ) : (
-                <Btn onClick={save}><Save size={14} /> Salvar</Btn>
+                <>
+                  <Btn
+                    variant="outline"
+                    onClick={() => {
+                      setDraft(patient);
+                      setEditing(false);
+                    }}
+                  >
+                    Cancelar
+                  </Btn>
+                  <Btn onClick={save}><Save size={14} /> Salvar</Btn>
+                </>
               )}
               <Btn variant="danger" onClick={onDelete}><Trash2 size={14} /></Btn>
             </div>
@@ -1717,6 +1764,9 @@ function PatientDetail({
                   onDelete={() => onDeleteSession(s.id)}
                   onAddFile={(file) => onAddSessionFile(s.id, file)}
                   onDeleteFile={(file) => onDeleteSessionFile(s.id, file)}
+                  onChangeTime={(date, time) => onUpdateSession(s.id, { date, time })}
+                  onCheckConflict={onCheckConflict ? (date, time) => onCheckConflict(date, time, s.id) : null}
+                  onVitalsChange={(patch) => onUpdateSession(s.id, patch)}
                 />
               ))}
             </div>
@@ -1766,6 +1816,9 @@ function PatientDetail({
                       onDelete={() => onDeleteSession(s.id)}
                       onAddFile={(file) => onAddSessionFile(s.id, file)}
                       onDeleteFile={(file) => onDeleteSessionFile(s.id, file)}
+                      onChangeTime={(date, time) => onUpdateSession(s.id, { date, time })}
+                      onCheckConflict={onCheckConflict ? (date, time) => onCheckConflict(date, time, s.id) : null}
+                      onVitalsChange={(patch) => onUpdateSession(s.id, patch)}
                     />
                   ))}
                 </div>
@@ -1785,6 +1838,8 @@ function PatientDetail({
                       onDelete={() => {}}
                       onAddFile={() => {}}
                       onDeleteFile={() => {}}
+                      onChangeTime={() => {}}
+                      onVitalsChange={() => {}}
                     />
                   ))}
                 </div>
@@ -1813,6 +1868,9 @@ function PatientDetail({
                       onDelete={() => onDeleteSession(s.id)}
                       onAddFile={(file) => onAddSessionFile(s.id, file)}
                       onDeleteFile={(file) => onDeleteSessionFile(s.id, file)}
+                      onChangeTime={(date, time) => onUpdateSession(s.id, { date, time })}
+                      onCheckConflict={onCheckConflict ? (date, time) => onCheckConflict(date, time, s.id) : null}
+                      onVitalsChange={(patch) => onUpdateSession(s.id, patch)}
                     />
                   ))}
               </div>
@@ -1826,6 +1884,42 @@ function PatientDetail({
 
 // Modal simples para renovar o plano: mostra quantas sessões o ciclo atual
 // já usou e pede o novo total de sessões do próximo pacote.
+// Modal para trocar a data/horário de uma sessão já registrada — funciona
+// tanto para sessões agendadas quanto já realizadas. Verifica em tempo real
+// se o novo horário já está ocupado por outro paciente antes de deixar
+// salvar.
+function EditTimeModal({ initialDate, initialTime, onCheckConflict, onClose, onSave }) {
+  const [date, setDate] = useState(initialDate || todayISO());
+  const [time, setTime] = useState(initialTime || "09:00");
+
+  const conflict = onCheckConflict ? onCheckConflict(date, time) : null;
+
+  return (
+    <Modal title="Trocar horário da sessão" onClose={onClose} width={360}>
+      <div style={{ display: "flex", gap: 10 }}>
+        <Field label="Nova data">
+          <input type="date" style={inputStyle} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Novo horário">
+          <input type="time" style={inputStyle} value={time} onChange={(e) => setTime(e.target.value)} />
+        </Field>
+      </div>
+      {conflict && (
+        <p style={{ color: COLOR.clayDark, fontSize: 13, marginTop: -6, marginBottom: 12 }}>
+          <AlertTriangle size={13} style={{ verticalAlign: -2 }} /> Esse horário já está ocupado por{" "}
+          <strong>{conflict.patientName}</strong>. Escolha outra data ou horário.
+        </p>
+      )}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <Btn variant="outline" onClick={onClose}>Cancelar</Btn>
+        <Btn disabled={!!conflict} onClick={() => onSave(date, time)}>
+          <Clock size={14} /> Salvar novo horário
+        </Btn>
+      </div>
+    </Modal>
+  );
+}
+
 function RenewPlanModal({ currentTotal, onClose, onConfirm }) {
   const [total, setTotal] = useState(currentTotal || 10);
   return (
@@ -1972,13 +2066,45 @@ function AtestadoView({ patient, onBack }) {
 // evolução clínica escrita por completo e os arquivos/fotos anexados. Sessões
 // agendadas abrem expandidas por padrão (defaultOpen); as já finalizadas
 // começam minimizadas e o usuário clica para abrir e ver o que foi escrito.
-function SessionRow({ session, patient, googleConnected, defaultOpen = false, onToggleStatus, onNotesChange, onDelete, onAddFile, onDeleteFile }) {
+function SessionRow({
+  session,
+  patient,
+  googleConnected,
+  defaultOpen = false,
+  onToggleStatus,
+  onNotesChange,
+  onDelete,
+  onAddFile,
+  onDeleteFile,
+  onChangeTime,
+  onCheckConflict,
+  onVitalsChange,
+}) {
   const [notes, setNotes] = useState(session.notes || "");
+  const [bp, setBp] = useState(session.bp || "");
+  const [imc, setImc] = useState(session.imc || "");
   const [open, setOpen] = useState(defaultOpen);
+  const [showEditTime, setShowEditTime] = useState(false);
   const done = session.status === "realizada";
   const synced = googleConnected && !!session.googleEventId;
   const fileCount = (session.files || []).length;
   const hasNotes = !!(session.notes && session.notes.trim());
+
+  function handleDelete() {
+    if (window.confirm("Remover esta sessão? Essa ação não pode ser desfeita.")) {
+      onDelete();
+    }
+  }
+
+  function suggestImc() {
+    const h = Number(patient.height);
+    const w = Number(patient.weight);
+    if (!h || !w) return;
+    const meters = h / 100;
+    const value = (w / (meters * meters)).toFixed(1);
+    setImc(value);
+    onVitalsChange({ imc: value });
+  }
 
   return (
     <div
@@ -2043,6 +2169,9 @@ function SessionRow({ session, patient, googleConnected, defaultOpen = false, on
               {fileCount > 0 && (
                 <Badge tone="neutral"><Paperclip size={11} /> {fileCount}</Badge>
               )}
+              {done && (session.bp || session.imc) && (
+                <Badge tone="neutral"><HeartPulse size={11} /> {session.bp || "—"}{session.imc ? ` · IMC ${session.imc}` : ""}</Badge>
+              )}
               {!open && hasNotes && (
                 <span
                   style={{
@@ -2061,6 +2190,9 @@ function SessionRow({ session, patient, googleConnected, defaultOpen = false, on
           </span>
         </button>
         <div className="no-print" style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+          <Btn variant="outline" style={{ fontSize: 12, padding: "6px 8px" }} onClick={() => setShowEditTime(true)} title="Trocar data/horário">
+            <Pencil size={13} /> Trocar horário
+          </Btn>
           {!done && !synced && (
             <a href={googleCalendarLink(session, patient)} target="_blank" rel="noopener noreferrer">
               <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
@@ -2068,7 +2200,7 @@ function SessionRow({ session, patient, googleConnected, defaultOpen = false, on
               </Btn>
             </a>
           )}
-          <Btn variant="danger" style={{ padding: "6px 8px" }} onClick={onDelete}>
+          <Btn variant="danger" style={{ padding: "6px 8px" }} onClick={handleDelete}>
             <Trash2 size={13} />
           </Btn>
           <button
@@ -2096,6 +2228,57 @@ function SessionRow({ session, patient, googleConnected, defaultOpen = false, on
         <p className="print-only" style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap", margin: "0 0 6px" }}>
           {session.notes || "Sem anotações."}
         </p>
+
+        {done && (
+          <div style={{ marginTop: 10 }}>
+            <div
+              className="no-print"
+              style={{
+                display: "flex",
+                gap: 10,
+                flexWrap: "wrap",
+                alignItems: "flex-end",
+                background: COLOR.paper,
+                border: `1px solid ${COLOR.border}`,
+                borderRadius: 8,
+                padding: 10,
+              }}
+            >
+              <Field label="Pressão arterial">
+                <input
+                  style={{ ...inputStyle, width: 120 }}
+                  value={bp}
+                  placeholder="120x80"
+                  onChange={(e) => setBp(e.target.value)}
+                  onBlur={() => onVitalsChange({ bp })}
+                />
+              </Field>
+              <Field label="IMC">
+                <input
+                  type="number"
+                  step="0.1"
+                  style={{ ...inputStyle, width: 90 }}
+                  value={imc}
+                  placeholder="—"
+                  onChange={(e) => setImc(e.target.value)}
+                  onBlur={() => onVitalsChange({ imc })}
+                />
+              </Field>
+              {patient.height && patient.weight && (
+                <Btn variant="outline" style={{ fontSize: 12, padding: "8px 10px", marginBottom: 14 }} onClick={suggestImc}>
+                  <Scale size={13} /> Calcular do prontuário
+                </Btn>
+              )}
+            </div>
+            {(session.bp || session.imc) && (
+              <p className="print-only" style={{ fontSize: 13, margin: "6px 0 0" }}>
+                {session.bp && <>Pressão arterial: {session.bp}. </>}
+                {session.imc && <>IMC: {session.imc}.</>}
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="no-print" style={{ marginTop: 10 }}>
           <FileManager
             files={session.files || []}
@@ -2112,12 +2295,26 @@ function SessionRow({ session, patient, googleConnected, defaultOpen = false, on
           </ul>
         )}
       </div>
+
+      {showEditTime && (
+        <EditTimeModal
+          initialDate={session.date}
+          initialTime={session.time}
+          onCheckConflict={onCheckConflict}
+          onClose={() => setShowEditTime(false)}
+          onSave={(date, time) => {
+            onChangeTime(date, time);
+            setShowEditTime(false);
+          }}
+        />
+      )}
     </div>
   );
 }
 
 // ---------- agenda ----------
-function AgendaView({ sessions, onOpenPatient }) {
+function AgendaView({ sessions, onOpenPatient, onCheckConflict, onChangeTime }) {
+  const [editing, setEditing] = useState(null); // { patientId, sessionId, date, time }
   const groups = useMemo(() => {
     const m = {};
     sessions.forEach((s) => {
@@ -2171,20 +2368,42 @@ function AgendaView({ sessions, onOpenPatient }) {
                     </span>
                     <span style={{ fontWeight: 700, fontSize: 14, color: COLOR.ink }}>{s.patient.name}</span>
                   </button>
-                  {s.googleEventId ? (
-                    <Badge tone="default"><CalendarCheck size={11} /> no Google Agenda</Badge>
-                  ) : (
-                    <a href={googleCalendarLink(s, s.patient)} target="_blank" rel="noopener noreferrer">
-                      <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
-                        <CalendarPlus size={13} /> Google Agenda
-                      </Btn>
-                    </a>
-                  )}
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <Btn
+                      variant="outline"
+                      style={{ fontSize: 12, padding: "6px 10px" }}
+                      onClick={() => setEditing({ patientId: s.patient.id, sessionId: s.id, date: s.date, time: s.time })}
+                    >
+                      <Pencil size={13} /> Trocar horário
+                    </Btn>
+                    {s.googleEventId ? (
+                      <Badge tone="default"><CalendarCheck size={11} /> no Google Agenda</Badge>
+                    ) : (
+                      <a href={googleCalendarLink(s, s.patient)} target="_blank" rel="noopener noreferrer">
+                        <Btn variant="outline" style={{ fontSize: 12, padding: "6px 10px" }}>
+                          <CalendarPlus size={13} /> Google Agenda
+                        </Btn>
+                      </a>
+                    )}
+                  </div>
                 </div>
               ))}
           </div>
         </div>
       ))}
+
+      {editing && (
+        <EditTimeModal
+          initialDate={editing.date}
+          initialTime={editing.time}
+          onCheckConflict={onCheckConflict ? (date, time) => onCheckConflict(date, time, editing.sessionId) : null}
+          onClose={() => setEditing(null)}
+          onSave={(date, time) => {
+            onChangeTime(editing.patientId, editing.sessionId, date, time);
+            setEditing(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2336,7 +2555,42 @@ function AddPatientModal({ onClose, onSave }) {
   );
 }
 
-function AddSessionModal({ onClose, onSave }) {
+const WEEKDAYS = [
+  { id: 0, label: "Dom" },
+  { id: 1, label: "Seg" },
+  { id: 2, label: "Ter" },
+  { id: 3, label: "Qua" },
+  { id: 4, label: "Qui" },
+  { id: 5, label: "Sex" },
+  { id: 6, label: "Sáb" },
+];
+
+function isoToLocalDate(iso) {
+  return new Date(iso + "T00:00:00");
+}
+
+function dateToISO(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Gera as datas (em ordem) de um repetição personalizada: anda dia a dia a
+// partir da data inicial e vai coletando as datas cujo dia da semana está
+// marcado, até bater o total de sessões pedido.
+function generateCustomDates(startISO, weekdaySet, totalCount) {
+  const dates = [];
+  let d = isoToLocalDate(startISO);
+  let guard = 0;
+  while (dates.length < totalCount && guard < 1000) {
+    if (weekdaySet.has(d.getDay())) {
+      dates.push(dateToISO(d));
+    }
+    d = new Date(d.getTime() + 86400000);
+    guard++;
+  }
+  return dates;
+}
+
+function AddSessionModal({ onClose, onSave, onCheckConflict }) {
   const [form, setForm] = useState({
     date: todayISO(),
     time: "09:00",
@@ -2344,33 +2598,71 @@ function AddSessionModal({ onClose, onSave }) {
     notes: "",
     repeat: "none",
     repeatCount: 4,
+    weekdays: [],
   });
   const [error, setError] = useState("");
 
+  const toggleWeekday = (id) => {
+    setForm((f) => ({
+      ...f,
+      weekdays: f.weekdays.includes(id) ? f.weekdays.filter((w) => w !== id) : [...f.weekdays, id].sort(),
+    }));
+  };
+
+  function buildDates() {
+    if (form.repeat === "none") return [form.date];
+    if (form.repeat === "custom") {
+      const set = new Set(form.weekdays);
+      return generateCustomDates(form.date, set, Math.max(1, Math.min(60, Number(form.repeatCount) || 1)));
+    }
+    const stepDays = form.repeat === "weekly" ? 7 : 14;
+    const count = Math.max(2, Math.min(24, Number(form.repeatCount) || 2));
+    const base = isoToLocalDate(form.date);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      out.push(dateToISO(new Date(base.getTime() + i * stepDays * 86400000)));
+    }
+    return out;
+  }
+
   function submit() {
+    setError("");
     if (!form.date) {
       setError("Escolha uma data.");
       return;
     }
-    const stepDays = form.repeat === "weekly" ? 7 : form.repeat === "biweekly" ? 14 : 0;
-    const count = form.repeat === "none" ? 1 : Math.max(2, Math.min(24, Number(form.repeatCount) || 2));
-    const base = new Date(form.date + "T00:00:00");
-
-    const sessions = [];
-    for (let i = 0; i < count; i++) {
-      const d = new Date(base.getTime() + i * stepDays * 86400000);
-      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-        d.getDate()
-      ).padStart(2, "0")}`;
-      sessions.push({
-        date: iso,
-        time: form.time,
-        // só a primeira ocorrência pode já vir marcada como "realizada";
-        // as próximas são sempre futuras, então ficam "agendada"
-        status: i === 0 ? form.status : "agendada",
-        notes: i === 0 ? form.notes : "",
-      });
+    if (form.repeat === "custom" && form.weekdays.length === 0) {
+      setError("Selecione pelo menos um dia da semana para repetir.");
+      return;
     }
+    const dates = buildDates();
+
+    // checa conflito de horário com sessões já agendadas de qualquer
+    // paciente — evita marcar duas pessoas no mesmo dia e horário.
+    if (onCheckConflict) {
+      const found = [];
+      for (const iso of dates) {
+        const c = onCheckConflict(iso, form.time, null);
+        if (c) found.push({ date: iso, patientName: c.patientName });
+      }
+      if (found.length > 0) {
+        setError(
+          found.length === 1
+            ? `Horário já ocupado por ${found[0].patientName} em ${fmtDate(found[0].date)}. Escolha outro horário ou data.`
+            : `Horário já ocupado em ${found.length} das datas geradas (ex.: ${found[0].patientName} em ${fmtDate(found[0].date)}). Escolha outro horário.`
+        );
+        return;
+      }
+    }
+
+    const sessions = dates.map((iso, i) => ({
+      date: iso,
+      time: form.time,
+      // só a primeira ocorrência pode já vir marcada como "realizada";
+      // as próximas são sempre futuras, então ficam "agendada"
+      status: i === 0 ? form.status : "agendada",
+      notes: i === 0 ? form.notes : "",
+    }));
     onSave(sessions);
   }
 
@@ -2395,18 +2687,52 @@ function AddSessionModal({ onClose, onSave }) {
           <option value="none">Não repetir — só esta sessão</option>
           <option value="weekly">Semanalmente</option>
           <option value="biweekly">A cada 15 dias</option>
+          <option value="custom">Personalizado — escolher dias da semana</option>
         </select>
       </Field>
+      {form.repeat === "custom" && (
+        <Field label="Dias da semana">
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            {WEEKDAYS.map((w) => {
+              const active = form.weekdays.includes(w.id);
+              return (
+                <button
+                  key={w.id}
+                  type="button"
+                  onClick={() => toggleWeekday(w.id)}
+                  style={{
+                    width: 40,
+                    height: 34,
+                    borderRadius: 7,
+                    fontFamily: FONT_BODY,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    border: `1px solid ${active ? COLOR.cyanDark : COLOR.border}`,
+                    background: active ? COLOR.cyanBg : "#fff",
+                    color: active ? COLOR.cyanDark : COLOR.inkLight,
+                  }}
+                >
+                  {w.label}
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+      )}
       {form.repeat !== "none" && (
-        <Field label="Quantas sessões no total (incluindo essa)">
+        <Field label={form.repeat === "custom" ? "Quantas sessões no total" : "Quantas sessões no total (incluindo essa)"}>
           <input
             type="number"
-            min={2}
-            max={24}
+            min={form.repeat === "custom" ? 1 : 2}
+            max={form.repeat === "custom" ? 60 : 24}
             style={{ ...inputStyle, width: 100 }}
             value={form.repeatCount}
             onChange={(e) =>
-              setForm({ ...form, repeatCount: Math.max(2, Math.min(24, Number(e.target.value) || 2)) })
+              setForm({
+                ...form,
+                repeatCount: Math.max(1, Math.min(form.repeat === "custom" ? 60 : 24, Number(e.target.value) || 1)),
+              })
             }
           />
         </Field>
