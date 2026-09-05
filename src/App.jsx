@@ -4,7 +4,7 @@ import {
   X, Check, Clock, FileText, Phone, Trash2, CalendarPlus, Users,
   Cake, Stethoscope, Save, Loader2, ClipboardList, Mic, Printer, CalendarCheck,
   ChevronDown, ChevronUp, Paperclip, UploadCloud, RefreshCw, History, Tag,
-  Pencil, HeartPulse, Scale
+  Pencil, HeartPulse
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import {
@@ -44,8 +44,15 @@ function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
+// BUG CORRIGIDO: antes esta função usava `new Date().toISOString().slice(0,10)`,
+// que calcula o dia em UTC. Como o Brasil está 3h atrás do UTC, depois das
+// 21h (horário de Brasília) o UTC já tinha virado o dia seguinte — e por
+// causa disso, tanto o campo de data quanto TODAS as sessões geradas por
+// repetição (semanal, quinzenal, personalizada) nasciam um dia adiantadas.
+// Agora usamos os componentes de data locais do navegador, sem conversão.
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function fmtDate(iso) {
@@ -84,6 +91,23 @@ function restantes(p) {
 // estatísticas gerais do paciente.
 function totalSessionsRealizadas(p) {
   return (p.sessions || []).filter((s) => s.status === "realizada").length;
+}
+
+// ---------- plano compartilhado (mais de uma pessoa no mesmo pacote) ----------
+// Pacientes que compartilham `planGroup` dividem o mesmo contador de sessões:
+// o que qualquer um deles usa desconta do total do grupo inteiro. Isso serve
+// para casais, famílias ou duplas que compram um único pacote de sessões.
+function groupMembers(patients, patient) {
+  if (!patient.planGroup) return [patient];
+  return (patients || []).filter((p) => p.planGroup === patient.planGroup);
+}
+
+function groupSessionsRealizadas(patients, patient) {
+  return groupMembers(patients, patient).reduce((sum, m) => sum + sessionsRealizadas(m), 0);
+}
+
+function groupRestantes(patients, patient) {
+  return Math.max(0, (patient.planTotal || 0) - groupSessionsRealizadas(patients, patient));
 }
 
 // Procura, entre TODOS os pacientes, uma sessão "agendada" na mesma data e
@@ -671,6 +695,7 @@ export default function ClinicaApp() {
       files: [], // fotos e arquivos de exames gerais do prontuário
       cycle: 1, // ciclo do plano atual (avança a cada renovação)
       planHistory: [], // registro dos ciclos/planos anteriores já concluídos
+      planGroup: null, // id do grupo de plano compartilhado (null = plano individual)
     };
     persist([p, ...patients]);
     setShowAddPatient(false);
@@ -806,22 +831,62 @@ export default function ClinicaApp() {
   // contagem de sessões realizadas nele) e avança para um novo ciclo com o
   // total de sessões informado. As sessões antigas continuam salvas — só
   // deixam de contar no contador principal, e ficam acessíveis em
-  // "ciclos anteriores".
+  // "ciclos anteriores". Se o paciente estiver num plano compartilhado
+  // (planGroup), a renovação vale para o grupo inteiro de uma vez, para o
+  // contador continuar igual pra todo mundo.
   function renewPlan(patientId, newTotal) {
     const patient = patients.find((p) => p.id === patientId);
     if (!patient) return;
+    const members = groupMembers(patients, patient);
+    const memberIds = new Set(members.map((m) => m.id));
     const entry = {
       id: uid(),
       cycle: currentCycle(patient),
       planTotal: patient.planTotal || 0,
-      sessionsRealizadas: sessionsRealizadas(patient),
+      sessionsRealizadas: groupSessionsRealizadas(patients, patient),
       renewedAt: todayISO(),
     };
-    updatePatient(patientId, {
-      planHistory: [...(patient.planHistory || []), entry],
-      cycle: currentCycle(patient) + 1,
-      planTotal: Number(newTotal) || 0,
-    });
+    persist(
+      patients.map((p) =>
+        memberIds.has(p.id)
+          ? {
+              ...p,
+              planHistory: [...(p.planHistory || []), entry],
+              cycle: currentCycle(patient) + 1,
+              planTotal: Number(newTotal) || 0,
+            }
+          : p
+      )
+    );
+  }
+
+  // Vincula (ou desvincula) o paciente a um plano compartilhado com outras
+  // pessoas. memberIds é a lista completa de IDs que devem ficar no grupo
+  // (sem contar o próprio patientId, que sempre faz parte). Quem sai do
+  // grupo vira paciente comum de novo, mantendo o planTotal/ciclo que já
+  // tinha.
+  function setPlanGroup(patientId, memberIds) {
+    const patient = patients.find((p) => p.id === patientId);
+    if (!patient) return;
+    const groupId = patient.planGroup || uid();
+    const keepIds = new Set([patientId, ...memberIds]);
+    persist(
+      patients.map((p) => {
+        if (keepIds.has(p.id)) {
+          return {
+            ...p,
+            planGroup: groupId,
+            patientType: "plano",
+            planTotal: patient.planTotal,
+            cycle: patient.cycle,
+          };
+        }
+        if (p.planGroup === groupId) {
+          return { ...p, planGroup: null };
+        }
+        return p;
+      })
+    );
   }
 
   async function addPatientFile(patientId, file) {
@@ -1079,6 +1144,7 @@ export default function ClinicaApp() {
         {tab === "pacientes" && !selected && (
           <PacientesList
             patients={filtered}
+            allPatients={patients}
             totalCount={patients.length}
             alertCount={alertCount}
             query={query}
@@ -1103,6 +1169,8 @@ export default function ClinicaApp() {
             onAddSessionFile={(sid, file) => addSessionFile(selected.id, sid, file)}
             onDeleteSessionFile={(sid, file) => deleteSessionFile(selected.id, sid, file)}
             onCheckConflict={checkTimeConflict}
+            onSetPlanGroup={(memberIds) => setPlanGroup(selected.id, memberIds)}
+            allPatients={patients}
             googleConnected={googleConnected}
           />
         )}
@@ -1182,7 +1250,7 @@ function StatCard({ icon: Icon, label, value, tone = "default" }) {
   );
 }
 
-function PacientesList({ patients, totalCount, alertCount, query, setQuery, onOpen, onAdd }) {
+function PacientesList({ patients, allPatients, totalCount, alertCount, query, setQuery, onOpen, onAdd }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
@@ -1215,9 +1283,10 @@ function PacientesList({ patients, totalCount, alertCount, query, setQuery, onOp
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14 }}>
           {patients.map((p) => {
             const isAvulso = p.patientType === "avulso";
-            const used = sessionsRealizadas(p);
+            const isShared = !!p.planGroup && groupMembers(allPatients, p).length > 1;
+            const used = isShared ? groupSessionsRealizadas(allPatients, p) : sessionsRealizadas(p);
             const totalUsed = totalSessionsRealizadas(p);
-            const rem = restantes(p);
+            const rem = isShared ? groupRestantes(allPatients, p) : restantes(p);
             const alert = !isAvulso && p.planTotal > 0 && rem <= 2;
             const nextSession = (p.sessions || [])
               .filter((s) => s.status === "agendada")
@@ -1284,6 +1353,7 @@ function PacientesList({ patients, totalCount, alertCount, query, setQuery, onOp
                     {p.diagnosis || "—"}
                   </div>
                   {isAvulso && <Badge tone="neutral"><Tag size={11} /> avulso</Badge>}
+                  {isShared && <Badge tone="default"><Users size={11} /> plano compartilhado</Badge>}
                   {alert && <Badge tone="alert"><AlertTriangle size={11} /> plano acabando</Badge>}
                   {!isAvulso && !alert && nextSession && (
                     <Badge tone="default"><Clock size={11} /> {fmtDate(nextSession.date)}</Badge>
@@ -1342,6 +1412,8 @@ function PatientDetail({
   onAddSessionFile,
   onDeleteSessionFile,
   onCheckConflict,
+  onSetPlanGroup,
+  allPatients,
   googleConnected,
 }) {
   const [editing, setEditing] = useState(false);
@@ -1350,6 +1422,7 @@ function PatientDetail({
   const [showRenew, setShowRenew] = useState(false);
   const [showFinished, setShowFinished] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showGroup, setShowGroup] = useState(false);
 
   useEffect(() => {
     setDraft(patient);
@@ -1358,11 +1431,14 @@ function PatientDetail({
     setShowRenew(false);
     setShowFinished(false);
     setShowHistory(false);
+    setShowGroup(false);
   }, [patient.id]);
 
   const isAvulso = patient.patientType === "avulso";
-  const used = sessionsRealizadas(patient);
-  const rem = restantes(patient);
+  const members = groupMembers(allPatients || [patient], patient);
+  const isShared = !!patient.planGroup && members.length > 1;
+  const used = isShared ? groupSessionsRealizadas(allPatients, patient) : sessionsRealizadas(patient);
+  const rem = isShared ? groupRestantes(allPatients, patient) : restantes(patient);
   const alert = !isAvulso && patient.planTotal > 0 && rem <= 2;
   const planFinished = !isAvulso && patient.planTotal > 0 && rem === 0;
   const cycle = currentCycle(patient);
@@ -1652,6 +1728,11 @@ function PatientDetail({
               {cycle > 1 && (
                 <span style={{ fontSize: 11, color: COLOR.inkLight }}>ciclo #{cycle}</span>
               )}
+              {isShared && (
+                <Badge tone="default">
+                  <Users size={11} /> plano com {members.length} pessoas
+                </Badge>
+              )}
               <span className="no-print" style={{ width: "100%" }}>
                 <Btn
                   variant={planFinished ? "sage" : "outline"}
@@ -1659,6 +1740,15 @@ function PatientDetail({
                   onClick={() => setShowRenew(true)}
                 >
                   <RefreshCw size={13} /> Renovar plano
+                </Btn>
+              </span>
+              <span className="no-print" style={{ width: "100%" }}>
+                <Btn
+                  variant="outline"
+                  style={{ width: "100%", justifyContent: "center", fontSize: 12, padding: "7px 8px" }}
+                  onClick={() => setShowGroup(true)}
+                >
+                  <Users size={13} /> {isShared ? "Gerenciar plano compartilhado" : "Compartilhar plano"}
                 </Btn>
               </span>
               {(patient.planHistory || []).length > 0 && (
@@ -1687,6 +1777,35 @@ function PatientDetail({
           )}
         </div>
       </div>
+
+      {isShared && (
+        <div
+          style={{
+            background: COLOR.paperRaised,
+            border: `1px solid ${COLOR.border}`,
+            borderRadius: 12,
+            padding: "10px 16px",
+            marginBottom: 20,
+            fontSize: 13,
+            color: COLOR.inkLight,
+          }}
+        >
+          <strong style={{ color: COLOR.ink }}>Plano compartilhado</strong> — as sessões de{" "}
+          {members.map((m) => m.name).join(", ")} contam juntas para o mesmo total de {patient.planTotal}.
+        </div>
+      )}
+
+      {showGroup && (
+        <PlanGroupModal
+          patient={patient}
+          allPatients={allPatients || []}
+          onClose={() => setShowGroup(false)}
+          onConfirm={(memberIds) => {
+            onSetPlanGroup(memberIds);
+            setShowGroup(false);
+          }}
+        />
+      )}
 
       {showHistory && (patient.planHistory || []).length > 0 && (
         <div
@@ -1920,6 +2039,71 @@ function EditTimeModal({ initialDate, initialTime, onCheckConflict, onClose, onS
   );
 }
 
+// Modal para colocar mais de uma pessoa no mesmo plano/pacote de sessões
+// (ex.: casal, família). Lista os outros pacientes com plano (não avulsos)
+// como checkboxes; quem for marcado passa a compartilhar o mesmo contador
+// de sessões e o mesmo total do paciente atual.
+function PlanGroupModal({ patient, allPatients, onClose, onConfirm }) {
+  const others = (allPatients || []).filter((p) => p.id !== patient.id && p.patientType !== "avulso");
+  const currentMembers = new Set(
+    groupMembers(allPatients, patient)
+      .filter((m) => m.id !== patient.id)
+      .map((m) => m.id)
+  );
+  const [selected, setSelected] = useState(currentMembers);
+
+  function toggle(id) {
+    setSelected((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  return (
+    <Modal title="Plano compartilhado" onClose={onClose} width={420}>
+      <p style={{ fontSize: 13, color: COLOR.inkLight, lineHeight: 1.5, marginTop: 0 }}>
+        Marque quem mais divide este pacote de <strong>{patient.planTotal}</strong> sessões com{" "}
+        <strong>{patient.name}</strong>. As sessões de qualquer um deles vão contar para o mesmo total.
+      </p>
+      {others.length === 0 ? (
+        <p style={{ fontSize: 13, color: COLOR.inkLight }}>
+          Não há outros pacientes com plano cadastrados ainda.
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+          {others.map((p) => (
+            <label
+              key={p.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "8px 10px",
+                borderRadius: 8,
+                background: selected.has(p.id) ? COLOR.cyanBg : COLOR.paper,
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} />
+              <span>{p.name}</span>
+              {p.planGroup && p.planGroup !== patient.planGroup && (
+                <span style={{ fontSize: 11, color: COLOR.clayDark, marginLeft: "auto" }}>já tem outro grupo</span>
+              )}
+            </label>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+        <Btn variant="outline" onClick={onClose}>Cancelar</Btn>
+        <Btn onClick={() => onConfirm(Array.from(selected))}><Users size={14} /> Salvar</Btn>
+      </div>
+    </Modal>
+  );
+}
+
 function RenewPlanModal({ currentTotal, onClose, onConfirm }) {
   const [total, setTotal] = useState(currentTotal || 10);
   return (
@@ -2082,7 +2266,9 @@ function SessionRow({
 }) {
   const [notes, setNotes] = useState(session.notes || "");
   const [bp, setBp] = useState(session.bp || "");
-  const [imc, setImc] = useState(session.imc || "");
+  const [eva, setEva] = useState(session.eva ?? "");
+  const [spo2, setSpo2] = useState(session.spo2 || "");
+  const [fc, setFc] = useState(session.fc || "");
   const [open, setOpen] = useState(defaultOpen);
   const [showEditTime, setShowEditTime] = useState(false);
   const done = session.status === "realizada";
@@ -2094,16 +2280,6 @@ function SessionRow({
     if (window.confirm("Remover esta sessão? Essa ação não pode ser desfeita.")) {
       onDelete();
     }
-  }
-
-  function suggestImc() {
-    const h = Number(patient.height);
-    const w = Number(patient.weight);
-    if (!h || !w) return;
-    const meters = h / 100;
-    const value = (w / (meters * meters)).toFixed(1);
-    setImc(value);
-    onVitalsChange({ imc: value });
   }
 
   return (
@@ -2169,8 +2345,18 @@ function SessionRow({
               {fileCount > 0 && (
                 <Badge tone="neutral"><Paperclip size={11} /> {fileCount}</Badge>
               )}
-              {done && (session.bp || session.imc) && (
-                <Badge tone="neutral"><HeartPulse size={11} /> {session.bp || "—"}{session.imc ? ` · IMC ${session.imc}` : ""}</Badge>
+              {done && (session.bp || session.eva !== undefined && session.eva !== "" || session.spo2 || session.fc) && (
+                <Badge tone="neutral">
+                  <HeartPulse size={11} />
+                  {[
+                    session.bp,
+                    session.eva !== undefined && session.eva !== "" ? `EVA ${session.eva}` : null,
+                    session.spo2 ? `SpO2 ${session.spo2}%` : null,
+                    session.fc ? `FC ${session.fc}bpm` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </Badge>
               )}
               {!open && hasNotes && (
                 <span
@@ -2253,27 +2439,50 @@ function SessionRow({
                   onBlur={() => onVitalsChange({ bp })}
                 />
               </Field>
-              <Field label="IMC">
+              <Field label="EVA (dor 0–10)">
                 <input
                   type="number"
-                  step="0.1"
-                  style={{ ...inputStyle, width: 90 }}
-                  value={imc}
+                  min={0}
+                  max={10}
+                  step="1"
+                  style={{ ...inputStyle, width: 70 }}
+                  value={eva}
                   placeholder="—"
-                  onChange={(e) => setImc(e.target.value)}
-                  onBlur={() => onVitalsChange({ imc })}
+                  onChange={(e) => setEva(e.target.value === "" ? "" : Math.max(0, Math.min(10, Number(e.target.value))))}
+                  onBlur={() => onVitalsChange({ eva })}
                 />
               </Field>
-              {patient.height && patient.weight && (
-                <Btn variant="outline" style={{ fontSize: 12, padding: "8px 10px", marginBottom: 14 }} onClick={suggestImc}>
-                  <Scale size={13} /> Calcular do prontuário
-                </Btn>
-              )}
+              <Field label="SpO2 (%)">
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  style={{ ...inputStyle, width: 80 }}
+                  value={spo2}
+                  placeholder="98"
+                  onChange={(e) => setSpo2(e.target.value)}
+                  onBlur={() => onVitalsChange({ spo2 })}
+                />
+              </Field>
+              <Field label="FC (bpm)">
+                <input
+                  type="number"
+                  min={0}
+                  max={260}
+                  style={{ ...inputStyle, width: 80 }}
+                  value={fc}
+                  placeholder="72"
+                  onChange={(e) => setFc(e.target.value)}
+                  onBlur={() => onVitalsChange({ fc })}
+                />
+              </Field>
             </div>
-            {(session.bp || session.imc) && (
+            {(session.bp || (session.eva !== undefined && session.eva !== "") || session.spo2 || session.fc) && (
               <p className="print-only" style={{ fontSize: 13, margin: "6px 0 0" }}>
                 {session.bp && <>Pressão arterial: {session.bp}. </>}
-                {session.imc && <>IMC: {session.imc}.</>}
+                {session.eva !== undefined && session.eva !== "" && <>EVA (dor): {session.eva}/10. </>}
+                {session.spo2 && <>SpO2: {session.spo2}%. </>}
+                {session.fc && <>FC: {session.fc} bpm.</>}
               </p>
             )}
           </div>

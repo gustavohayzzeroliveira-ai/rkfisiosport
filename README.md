@@ -2,6 +2,23 @@
 
 ## Novidades desta versão
 
+- **Bug do Google Agenda corrigido**: a data "hoje" do app era calculada em
+  UTC, então à noite (depois das ~21h em Brasília) o app já achava que era
+  o dia seguinte — e isso bagunçava as datas de sessões repetidas
+  (semanais, quinzenais, personalizadas). Agora a data usa sempre o fuso
+  local do navegador.
+- **Escala EVA, SpO2 e FC**: no lugar do IMC, cada sessão realizada agora
+  tem espaço para anotar a escala de dor EVA (0 a 10), a saturação de
+  oxigênio (SpO2) e a frequência cardíaca (FC).
+- **Plano compartilhado**: dá pra colocar duas ou mais pessoas no mesmo
+  pacote de sessões (por exemplo, casal ou família dividindo o mesmo
+  plano). No prontuário do paciente, use o botão **Compartilhar plano**
+  para escolher com quem ele divide o pacote — as sessões de qualquer um
+  deles passam a contar para o mesmo total, e renovar o plano de um
+  renova de todo mundo do grupo junto.
+
+
+
 - **Trocar horário fácil**: cada sessão (mesmo já marcada) tem um botão
   **Trocar horário**, tanto no prontuário do paciente quanto na aba
   **Agenda**. O app não deixa salvar um horário que já esteja ocupado por
